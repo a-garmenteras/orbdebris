@@ -1,0 +1,34 @@
+[project]
+name = "orbdebris"
+version = "0.1.0"
+description = "Orbital debris-collection simulator: two-body propagation, Lambert phasing, CW rendezvous"
+readme = "README.md"
+authors = [
+    { name = "a-garmenteras", email = "306163614+a-garmenteras@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.0",
+    "numpy>=2.5.1",
+    "scipy>=1.18.0",
+]
+
+[project.scripts]
+orbdebris = "orbdebris:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]
+
+[tool.uv]
+native-tls = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

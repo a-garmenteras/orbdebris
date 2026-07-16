@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated figures/animations - all reproducible from scripts, and the GIF is
+# a few MB, which does not belong in git.
+*.png
+*.gif
+
+# Personal context for Claude Code (not shared)
+CLAUDE.local.md
