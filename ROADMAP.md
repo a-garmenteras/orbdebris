@@ -33,11 +33,41 @@ to this order.
       degenerates at close range into two dots on one line — an accidental but
       good demonstration of *why* the Hill frame exists: it subtracts the
       ~7.6 km/s of common motion that hides the relative geometry.
-- [ ] **Milestone 3 — Capture dynamics.** Short-range contact/net physics
-      (likely where a contact-physics engine like PyBullet enters), separate
-      from the orbital-scale propagator.
-- [ ] **Milestone 4 — Three-satellite constellation.** Multiple chasers,
-      coordination, shared net.
+- [x] **Milestone 3 — Capture dynamics (single-chaser baseline).** The contact
+      engine: a hand-rolled mass-spring membrane net, a cloud of 1–10 cm
+      pellets, and a Hill-frame capture sim. From a 30 m standoff the chaser
+      tosses a CW-aimed net, the drawstring closes, and it tows the bag away
+      (`uv run python scripts/run_capture.py`): 30 pellets, captured at
+      t=29 s, 77% retained flat through 80 s of tow, centroid moved 57 m.
+      Proves the physics the constellation (M4) builds on. No PyBullet — see
+      decisions below.
+- [ ] **Milestone 3b — Launch-window targeting.** Given a spaceport lat/long,
+      pick the launch time: the target's orbital plane sweeps over the site
+      twice a day, and launching off-window costs plane-error delta-v at
+      ~130 m/s per degree (v·dθ at 7.6 km/s) — far dominating phasing costs.
+      Scope: insertion-state-from-(site, time) abstraction (no ascent
+      modeling), RAAN as a scenario variable, 24 h launch-time sweep showing
+      the two daily alignment notches. Subsumes the deferred plane-change
+      item; the Lambert solver is already 3D, so scenario plumbing is most of
+      the work. Phase timing stays with the drift-first planner (already
+      near-free); the launch window's real payoff is plane alignment.
+- [ ] **Milestone 4 — Four-satellite funnel constellation.** The operational
+      concept: the chaser stages *behind* the cloud, splits into four; three
+      lead in formation holding a funnel net's **mouth** open (this is why a
+      constellation is needed at all — in vacuum there is no drag to stream a
+      towed net open, so formation flying does the job water does for a
+      trawler); the fourth trails at the **apex** as the cod-end where the
+      catch collects. The formation closes from behind, sweeps through the
+      cloud, cinches, and regroups for the next target. Reuses the M3 engine
+      (membrane, pellets, contact, drawstring, tow); new work is the conical
+      net topology, formation control, and the approach.
+      *Physics note:* burning prograde to "speed up and catch from behind" is
+      the M1 trap in CW clothing — `ẍ = +2nẏ` balloons you radially (a 2 m/s
+      prograde burn drifts +539 m up in 500 s and still misses). The CW solve
+      answers with a burn that is ~57% *downward*. Cheaper still: drop ~106 m,
+      let the natural drift close 1 km in 95 min for ~12 cm/s (~17x cheaper),
+      arriving at ~18 cm/s — which is also gentler than the 1.2 m/s that M3
+      showed already risks batting pellets away.
 - [ ] **Milestone 5 — Fuel & power constraints.** Resource budgets feeding
       back into guidance decisions. *Groundwork exists: the planner's
       `max_mission_time` deadline already selects a point on the fuel/time
@@ -47,6 +77,19 @@ to this order.
 - [ ] **Milestone 6 — Autonomy / training.** Revisit classical vs. learned
       (RL) control now that the fundamentals and a working environment
       exist.
+
+## Known simplifications (honest limits, future work)
+
+- **Capture:** no net self-collision (fabric folds pass through themselves —
+  this is why a shallow pocket leaks pellets and the deep 7x7 one does not),
+  no real friction (tangential velocity damping stands in), no pellet-pellet
+  collisions (dilute cloud), and gravity inside the capture region is the
+  linear CW approximation.
+- **Orbits:** two-body only — no J2, no drag, no SRP. This is why
+  station-keeping costs ~0.1 m/s/year here; real LEO station-keeping is
+  dominated by drag make-up, and differential ballistic coefficients between
+  chaser and debris would continuously regenerate the drift we null.
+- **Scenarios:** coplanar (see M3b), non-tumbling bodies.
 
 ## Architecture decisions
 
@@ -81,6 +124,34 @@ to this order.
   nulling the drift costs ~0.0008 m/s versus ~0.08 m/s. Measured over 50 orbits:
   station-keeping fell from 0.156 to 0.0002 m/s/day (~845x) *and* the radial
   hold tightened from ±26 m to ±0.6 m. Decided 2026-07-16.
+- **Capture engine is hand-rolled, not PyBullet:** a mass-spring membrane in
+  the Hill frame, integrated with semi-implicit (symplectic) Euler — the
+  standard cloth-sim choice, stable for stiff springs where explicit Euler
+  pumps energy in. Transparency over free contact features; the float32
+  objection from kickoff does *not* apply at Hill-frame scales, so PyBullet
+  stays available if friction-dominated wrapping ever demands it. Cords are
+  **tension-only** (a rope that could push would make the net a trampoline and
+  bounce debris off). Capture units are **metres**, converted at
+  `CaptureSim.from_hill_state` — cloth/contact literature is SI. New engine
+  cross-validated against the old: a free body in the capture integrator
+  reproduces `relative.cw_propagate` to <1 cm over 200 s. Decided 2026-07-17.
+- **The net needs a membrane, not just cords:** the target population is
+  1–10 cm pellets and the mesh has ~1 m holes — a cord lattice is a sieve. The
+  fabric surface is the grid's triangulation, with sphere-vs-triangle contact
+  and reactions split barycentrically to the spanning nodes. The debris is a
+  *cloud* whose centroid is exactly the point M2b's rendezvous targeted.
+  Per-pellet contact stiffness `k_i = m_i*omega²` keeps a 2 g pellet and a
+  1.4 kg pellet on the same contact timescale (a fixed k would put the light
+  one outside the stable timestep). Decided 2026-07-17.
+- **Capture is gentle and geometric, learned from three failures:** (1) fast
+  contact is near-elastic — 2.6 m/s batted pellets to ±200 m; approach at
+  ~1.2 m/s with heavily damped (inelastic) contact so the membrane herds.
+  (2) Trigger the drawstring on *geometry* (mouth ring has swept past the
+  cloud centroid), not first contact — first contact fires on the nearest
+  pellet and bags only the cloud's leading edge. (3) The bridle arrest is
+  impulsive and flings the catch back out: soften and heavily damp it, and
+  cinch the mouth to 5% so cm pellets cannot slip the gap. Retention went
+  7% -> 17% -> 77%. Decided 2026-07-17.
 - **Two propagators, on purpose:** `dynamics.propagate` (numerical, general,
   the simulation's truth) and `kepler.kepler_propagate` (analytic universal-
   variable, same physics in closed form) for the thousands of coasts inside

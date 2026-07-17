@@ -32,3 +32,8 @@ native-tls = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: long-running integration tests (deselect with -m 'not slow')",
+]
