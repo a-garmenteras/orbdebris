@@ -46,6 +46,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FuncAnimation, PillowWriter  # noqa: E402
+from matplotlib.collections import LineCollection  # noqa: E402
 
 from orbdebris.constants import R_EARTH  # noqa: E402
 from orbdebris.kepler import kepler_propagate
@@ -281,3 +282,113 @@ def animate_mission(
     anim.save(output_path, writer=PillowWriter(fps=fps), dpi=dpi)
     plt.close(fig)
     return output_path
+
+
+# --------------------------------------------------------------------------
+# Milestone 4: funnel-constellation capture animation.
+# --------------------------------------------------------------------------
+
+# What phase the camera is in at each event time -> a caption. The half-orbit
+# approach coast is analytic (not stepped), so it is announced rather than shown.
+_FUNNEL_PHASES = {
+    "split": "DEPLOY & HOLD - one chaser splits into four; the net unfurls and the\n"
+    "formation station-keeps, holding the mouth open behind the cloud",
+    "approach_burn": "APPROACH - burn radial-down, coast half an orbit (not shown),\n"
+    "arrive sweeping radially UP through the cloud",
+    "first_contact": "SWEEP - the funnel engulfs the debris cloud",
+    "cinch_start": "CINCH - satellites release the rim; the drawstring purses it shut",
+    "captured": "CAPTURED - the cloud is bagged at the cod-end",
+    "regroup_start": "REGROUP - collapse to a compact formation for the next target",
+}
+
+
+def _phase_caption(events: dict, t: float) -> str:
+    active = [(t0, _FUNNEL_PHASES[name]) for name, t0 in events.items()
+              if name in _FUNNEL_PHASES and t >= t0]
+    return max(active, key=lambda kv: kv[0])[1] if active else "DEPLOY"
+
+
+def animate_funnel(
+    result,
+    output_path: str = "funnel.gif",
+    n_frames: int = 220,
+    fps: int = 20,
+    dpi: int = 80,
+    margin: float = 6.0,
+) -> str:
+    """Two Hill side-views of the funnel constellation capturing a pellet cloud:
+    radial-vs-along-track and radial-vs-cross-track. The net is drawn as its
+    cords (line segments), the four satellites as markers (3 mouth, 1 apex), and
+    the pellets as dots. The camera follows the net centroid and frames both the
+    net and the (nearby) cloud, so the whole deploy -> sweep -> cinch -> regroup
+    sequence stays in view. Escaped pellets that fly far off are left off-frame.
+    """
+    net = result.net
+    n_nodes = result.n_nodes
+    links = net.links
+    frames = np.unique(np.linspace(0, len(result.t) - 1, n_frames).astype(int))
+
+    sats = slice(0, 4)
+    nodes = slice(4, 4 + n_nodes)
+    pellets = slice(4 + n_nodes, None)
+    mouth_sats, apex_sat = [0, 1, 2], 3
+
+    net_c = result.pos[:, nodes].mean(axis=1)  # [S, 3] net centroid over time
+
+    fig, (ax_xy, ax_xz) = plt.subplots(1, 2, figsize=(13, 6.2))
+    projections = ((ax_xy, 0, 1, "radial x [m]", "along-track y [m]"),
+                   (ax_xz, 0, 2, "radial x [m]", "cross-track z [m]"))
+    for ax, _, _, xlabel, ylabel in projections:
+        ax.set_aspect("equal")
+        ax.set_xlabel(xlabel, fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.2)
+
+    artists = {}
+    for ax, i, j, _, _ in projections:
+        lc = LineCollection([], colors="tab:blue", linewidths=0.4, alpha=0.5)
+        ax.add_collection(lc)
+        (pel,) = ax.plot([], [], "o", color="tab:orange", ms=4, label="pellets")
+        (msat,) = ax.plot([], [], "s", color="tab:green", ms=8, label="mouth sats")
+        (asat,) = ax.plot([], [], "D", color="tab:red", ms=8, label="apex sat")
+        artists[ax] = (lc, pel, msat, asat, i, j)
+    ax_xy.legend(loc="upper right", fontsize=7)
+
+    readout = fig.text(0.5, 0.965, "", ha="center", fontsize=10, family="monospace")
+    caption = fig.text(0.5, 0.915, "", ha="center", fontsize=9, color="tab:blue")
+
+    def update(f):
+        k = frames[f]
+        pos = result.pos[k]
+        node_pos = pos[nodes]
+        for ax, (lc, pel, msat, asat, i, j) in artists.items():
+            segs = np.stack([node_pos[links[:, 0]][:, [i, j]],
+                             node_pos[links[:, 1]][:, [i, j]]], axis=1)
+            lc.set_segments(segs)
+            pp = pos[pellets]
+            pel.set_data(pp[:, i], pp[:, j])
+            ss = pos[sats]
+            msat.set_data(ss[mouth_sats, i], ss[mouth_sats, j])
+            asat.set_data([ss[apex_sat, i]], [ss[apex_sat, j]])
+            # Camera: centre on the net, framing it plus any nearby cloud.
+            cx, cy = net_c[k, i], net_c[k, j]
+            near = np.linalg.norm(pp - net_c[k], axis=1) < 25.0
+            pts_i = np.concatenate([node_pos[:, i], ss[:, i], pp[near, i], [cx]])
+            pts_j = np.concatenate([node_pos[:, j], ss[:, j], pp[near, j], [cy]])
+            half = max(np.abs(pts_i - cx).max(), np.abs(pts_j - cy).max()) + margin
+            ax.set_xlim(cx - half, cx + half)
+            ax.set_ylim(cy - half, cy + half)
+
+        t = result.t[k]
+        n_in = round(result.retained_frac[k] * len(result.pos[k, pellets]))
+        readout.set_text(f"t = {t:6.1f} s    bagged = {n_in:2d}    "
+                         f"formation dv = {result.formation_dv[k]:.2f} m/s")
+        caption.set_text(_phase_caption(result.events, t))
+        return ()
+
+    anim = FuncAnimation(fig, update, frames=len(frames), blit=False)
+    anim.save(output_path, writer=PillowWriter(fps=fps), dpi=dpi)
+    plt.close(fig)
+    return output_path
+

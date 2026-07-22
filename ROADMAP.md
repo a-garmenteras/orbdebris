@@ -51,23 +51,26 @@ to this order.
       item; the Lambert solver is already 3D, so scenario plumbing is most of
       the work. Phase timing stays with the drift-first planner (already
       near-free); the launch window's real payoff is plane alignment.
-- [ ] **Milestone 4 — Four-satellite funnel constellation.** The operational
-      concept: the chaser stages *behind* the cloud, splits into four; three
-      lead in formation holding a funnel net's **mouth** open (this is why a
-      constellation is needed at all — in vacuum there is no drag to stream a
-      towed net open, so formation flying does the job water does for a
-      trawler); the fourth trails at the **apex** as the cod-end where the
-      catch collects. The formation closes from behind, sweeps through the
-      cloud, cinches, and regroups for the next target. Reuses the M3 engine
-      (membrane, pellets, contact, drawstring, tow); new work is the conical
-      net topology, formation control, and the approach.
+- [x] **Milestone 4 — Four-satellite funnel constellation.** The operational
+      concept, working end to end (`uv run python scripts/run_funnel.py`;
+      animation `scripts/animate_funnel.py`): the chaser stages 1 km *behind*
+      the cloud, splits into four; three lead in formation holding a conical
+      net's **mouth** open (this is why a constellation is needed — in vacuum
+      there is no drag to stream a towed net open, so formation flying does the
+      job water does for a trawler); the fourth trails at the **apex** cod-end.
+      The formation station-keeps while the net deploys, burns to close from
+      behind, sweeps through the cloud, purses the mouth shut, captures, and
+      collapses to a compact formation to regroup. Reuses the M3 engine
+      (membrane, pellets, contact, drawstring) via a shared force core; new work
+      is the conical net, the velocity-limited PD formation controller, and the
+      approach. *Result:* 28/30 pellets bagged, ~2–4 m/s formation-keeping over
+      the whole operation.
       *Physics note:* burning prograde to "speed up and catch from behind" is
       the M1 trap in CW clothing — `ẍ = +2nẏ` balloons you radially (a 2 m/s
       prograde burn drifts +539 m up in 500 s and still misses). The CW solve
-      answers with a burn that is ~57% *downward*. Cheaper still: drop ~106 m,
-      let the natural drift close 1 km in 95 min for ~12 cm/s (~17x cheaper),
-      arriving at ~18 cm/s — which is also gentler than the 1.2 m/s that M3
-      showed already risks batting pellets away.
+      for a half-orbit transfer answers with a burn that is *purely radial-
+      down*, arriving *purely radial-up* — the constellation catches the cloud
+      by sweeping vertically, never chasing along-track.
 - [ ] **Milestone 5 — Fuel & power constraints.** Resource budgets feeding
       back into guidance decisions. *Groundwork exists: the planner's
       `max_mission_time` deadline already selects a point on the fuel/time
@@ -85,6 +88,10 @@ to this order.
   no real friction (tangential velocity damping stands in), no pellet-pellet
   collisions (dilute cloud), and gravity inside the capture region is the
   linear CW approximation.
+- **Constellation:** the satellite-to-net attachment is a stiff tension-only
+  bond, not a modelled winch/boom; the "cod-end" is where pellets gather, not a
+  sealed container; the regroup target is a fixed compact cluster, not an
+  optimised transit formation.
 - **Orbits:** two-body only — no J2, no drag, no SRP. This is why
   station-keeping costs ~0.1 m/s/year here; real LEO station-keeping is
   dominated by drag make-up, and differential ballistic coefficients between
@@ -152,6 +159,29 @@ to this order.
   impulsive and flings the catch back out: soften and heavily damp it, and
   cinch the mouth to 5% so cm pellets cannot slip the gap. Retention went
   7% -> 17% -> 77%. Decided 2026-07-17.
+- **Formation-keeping is a real, ongoing cost:** a rigid formation held across
+  the velocity vector is *not* a natural CW motion (only pure along-track
+  offsets are), so the three mouth satellites thrust continuously to hold the
+  funnel open — ~8 m/s/day at hold, ~2–4 m/s over a capture. Reporting that
+  cost is the point, not a bug: it is the fuel answer to "why not just fly a
+  net?" The controller is a **velocity-limited PD** (position error commands a
+  clamped cruise velocity; an inner loop regulates to it), because a plain PD
+  saturates *outward* at large error and overshoots by v²/(2·a_max). Its slots
+  must stay centred on the satellite centroid — an un-centred target is an
+  unreachable fixed point and the controller thrusts forever (this bug bit
+  three times: initial formation, regroup, and is why `centre_slots` exists).
+  Decided 2026-07-22.
+- **The cinch releases the satellites; it does not haul them:** closing the
+  mouth by flying the three satellites inward whips the membrane and flings the
+  catch back out (the M3 arrest lesson again). Instead the satellites release
+  the rim and a gentle drawstring purses it shut — 67% → 90% retention. And the
+  net deploys under a whole-formation **position hold**, or its deploy transient
+  billows the funnel forward into the cloud before the approach burn. Decided
+  2026-07-22.
+- **Compute scale-separation, again:** the 47-minute half-orbit approach is
+  pure CW flow, computed analytically; only the ~60 s terminal sweep runs in
+  the fine contact sim. Same split the mission scale used (drift analytic,
+  capture stepped). Decided 2026-07-22.
 - **Two propagators, on purpose:** `dynamics.propagate` (numerical, general,
   the simulation's truth) and `kepler.kepler_propagate` (analytic universal-
   variable, same physics in closed form) for the thousands of coasts inside

@@ -1,6 +1,7 @@
 import numpy as np
 
 from orbdebris.animate import (
+    animate_funnel,
     animate_mission,
     ballistic_forecast,
     forecast_times,
@@ -143,6 +144,28 @@ def test_animate_mission_accepts_explicit_frame_times(tmp_path):
         trail_seconds=600.0,
         dpi=50,
     )
+
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_animate_funnel_writes_a_gif(tmp_path):
+    """Smoke test: a tiny funnel scenario renders to a non-empty GIF."""
+    from orbdebris.constellation import FunnelSim
+    from orbdebris.debris import make_pellet_cloud
+    from orbdebris.net import build_funnel_net
+
+    n_ref = mean_motion(R_EARTH + 500.0, GM_EARTH)
+    net = build_funnel_net(n_rings=3, n_sectors=6, mouth_radius=4.0, length=8.0)
+    cloud = make_pellet_cloud(n_pellets=6, sigma_pos=1.0, seed=2)
+    sim = FunnelSim.from_hill_state(
+        net, cloud, n_ref, np.array([0.0, -0.01, 0.0]), np.zeros(3)
+    )
+    sim.deploy_open(np.array([0.2, 0.0, 0.0]))
+    result = sim.run(6.0, dt=0.01, record_every=50)
+
+    out = tmp_path / "funnel_smoke.gif"
+    animate_funnel(result, output_path=str(out), n_frames=5, dpi=45)
 
     assert out.exists()
     assert out.stat().st_size > 0

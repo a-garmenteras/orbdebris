@@ -1,6 +1,8 @@
 import numpy as np
 
 from orbdebris.capture import cw_accelerations
+import pytest
+
 from orbdebris.constellation import (
     APEX_SAT,
     MOUTH_SATS,
@@ -9,6 +11,7 @@ from orbdebris.constellation import (
     approach_burn,
     centre_slots,
     formation_slots,
+    funnel_demo,
 )
 from orbdebris.constants import GM_EARTH, R_EARTH
 from orbdebris.debris import make_pellet_cloud
@@ -149,9 +152,36 @@ def test_rim_sags_between_its_three_supports():
 def test_mouth_satellites_must_divide_the_rim_evenly():
     """A rim whose sectors do not divide by 3 leaves one oversized unsupported
     arc, which sags badly. Fail loudly rather than quietly capture less."""
-    import pytest
-
     net = build_funnel_net(n_rings=4, n_sectors=10, mouth_radius=5.0, length=12.0)
     cloud = make_pellet_cloud(n_pellets=5, seed=1)
     with pytest.raises(ValueError, match="divisible"):
         FunnelSim.from_hill_state(net, cloud, N_REF, np.array([0.0, -1.0, 0.0]), np.zeros(3))
+
+
+@pytest.mark.slow
+def test_end_to_end_sweep_captures_and_regroups_cheaply():
+    """The canonical M4 scenario (constellation.funnel_demo - the same one the
+    script runs): the funnel sweeps the cloud, cinches, captures a majority,
+    and regroups. Also guards the two centred-slot regressions - a broken
+    invariant makes the controller thrust forever, so the formation dv would
+    blow up (17 m/s+) instead of settling near ~2 m/s."""
+    sim, sweep_velocity, approach = funnel_demo()
+    n_pellets = sim.cloud.n_pellets
+
+    # The approach is the project's recurring lesson: catching from behind is a
+    # purely radial burn, and the arrival sweep is purely radial too.
+    assert abs(approach["burn"][1]) < 1e-3 and approach["burn"][0] < 0
+    assert abs(sweep_velocity[1]) < 1e-3
+
+    sim.deploy_open(sweep_velocity)
+    result = sim.run(duration=140.0, dt=0.0015, record_every=200)
+
+    assert result.captured
+    assert result.events["cinch_start"] >= result.events["first_contact"] - 1e-9
+    assert result.retained_frac[-1] >= 0.6  # majority bagged
+    assert round(result.retained_frac[-1] * n_pellets) >= 0.6 * n_pellets
+
+    # Regroup must be a gentle glide, not a runaway: with the centred-slots
+    # invariant intact the formation cost settles well under 5 m/s.
+    assert result.formation_dv[-1] < 5.0
+    assert result.mouth_radius[-1] < 0.5  # mouth pursed shut
