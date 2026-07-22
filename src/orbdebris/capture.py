@@ -49,6 +49,89 @@ CHASER, NODES0 = 0, 1
 EJECT, FLY, WRAP, TOW = "EJECT", "FLY", "WRAP", "TOW"
 
 
+# --------------------------------------------------------------------------
+# Shared force engine. These are the pieces that are identical for any
+# Hill-frame net simulation, so constellation.py (the 4-satellite funnel)
+# uses them verbatim rather than duplicating the physics.
+# --------------------------------------------------------------------------
+
+
+def cw_accelerations(pos: np.ndarray, vel: np.ndarray, n: float) -> np.ndarray:
+    """Linear Clohessy-Wiltshire pseudo-accelerations for every body [B, 3].
+
+    (3n²x + 2nẏ, −2nẋ, −n²z) - linear in the state, hence fully vectorised
+    across bodies of any kind: satellites, net nodes and pellets alike.
+    """
+    a = np.zeros_like(pos)
+    a[:, 0] = 3 * n**2 * pos[:, 0] + 2 * n * vel[:, 1]
+    a[:, 1] = -2 * n * vel[:, 0]
+    a[:, 2] = -(n**2) * pos[:, 2]
+    return a
+
+
+def membrane_contact_forces(
+    forces: np.ndarray,
+    node_pos: np.ndarray,
+    node_vel: np.ndarray,
+    node_rows: np.ndarray,
+    triangles: np.ndarray,
+    pellet_pos: np.ndarray,
+    pellet_vel: np.ndarray,
+    pellet_rows: np.ndarray,
+    pellet_radii: np.ndarray,
+    pellet_masses: np.ndarray,
+    omega: float,
+    zeta: float,
+    tangent_zeta: float,
+) -> int:
+    """Add pellet-vs-membrane penalty contact into ``forces`` in place.
+
+    Contact is against the fabric *surface* (the triangulation), not the cords:
+    a cord lattice is a sieve to cm-scale pellets. The reaction on the
+    membrane is split barycentrically over the triangle's three nodes, so the
+    pair of forces is internal and momentum is conserved.
+
+    Stiffness is per pellet, ``k_i = m_i * omega²``: one shared contact
+    timescale for every pellet regardless of mass, which keeps a 2 g pellet
+    inside the integrator's stable timestep alongside a 1.4 kg one.
+
+    Returns the number of pellets in contact.
+    """
+    a = node_pos[triangles[:, 0]]
+    b = node_pos[triangles[:, 1]]
+    c = node_pos[triangles[:, 2]]
+    closest, bary = closest_points_on_triangles(pellet_pos, a, b, c)
+
+    diff = pellet_pos[:, None, :] - closest  # [P, T, 3]
+    dist = np.linalg.norm(diff, axis=-1)
+    pen = pellet_radii[:, None] - dist
+    pi, ti = np.nonzero(pen > 0.0)
+    if not len(pi):
+        return 0
+
+    n_hat = diff[pi, ti] / np.maximum(dist[pi, ti], 1e-9)[:, None]
+    w_bary = bary[pi, ti]  # [K, 3]
+    v_mem = (
+        w_bary[:, 0:1] * node_vel[triangles[ti, 0]]
+        + w_bary[:, 1:2] * node_vel[triangles[ti, 1]]
+        + w_bary[:, 2:3] * node_vel[triangles[ti, 2]]
+    )
+    v_rel = pellet_vel[pi] - v_mem
+    v_n = np.einsum("ij,ij->i", v_rel, n_hat)
+    m_p = pellet_masses[pi]
+    k_i = m_p * omega**2
+    c_i = 2.0 * zeta * m_p * omega
+    f_n = np.maximum(k_i * pen[pi, ti] - c_i * v_n, 0.0)
+    v_t = v_rel - v_n[:, None] * n_hat
+    c_t = 2.0 * tangent_zeta * m_p * omega
+    f_vec = f_n[:, None] * n_hat - c_t[:, None] * v_t
+
+    np.add.at(forces, pellet_rows[pi], f_vec)
+    for k in range(3):
+        np.add.at(forces, node_rows[triangles[ti, k]], -w_bary[:, k : k + 1] * f_vec)
+    return int(np.unique(pi).size)
+
+
 @dataclass
 class CaptureResult:
     t: np.ndarray  # [S]
@@ -308,45 +391,21 @@ class CaptureSim:
         # Membrane contact: pellets vs the triangulated fabric surface.
         contacts = 0
         if self.enable_contact:
-            tri = self.net.triangles
-            a, b, c = node_pos[tri[:, 0]], node_pos[tri[:, 1]], node_pos[tri[:, 2]]
-            p_pos = self.pos[self.pellets]
-            p_vel = self.vel[self.pellets]
-            closest, bary = closest_points_on_triangles(p_pos, a, b, c)
-
-            diff = p_pos[:, None, :] - closest  # [P, T, 3]
-            dist = np.linalg.norm(diff, axis=-1)  # [P, T]
-            pen = self.cloud.radii[:, None] - dist
-            pi, ti = np.nonzero(pen > 0.0)
-            contacts = int(np.unique(pi).size)
-            if len(pi):
-                n_hat = diff[pi, ti] / np.maximum(dist[pi, ti], 1e-9)[:, None]
-                w_bary = bary[pi, ti]  # [K, 3]
-                # Membrane velocity at each contact point (barycentric blend).
-                v_mem = (
-                    w_bary[:, 0:1] * node_vel[tri[ti, 0]]
-                    + w_bary[:, 1:2] * node_vel[tri[ti, 1]]
-                    + w_bary[:, 2:3] * node_vel[tri[ti, 2]]
-                )
-                v_rel = p_vel[pi] - v_mem
-                v_n = np.einsum("ij,ij->i", v_rel, n_hat)
-                m_p = self.cloud.masses[pi]
-                k_i = m_p * self.contact_omega**2
-                c_i = 2.0 * self.contact_zeta * m_p * self.contact_omega
-                f_n = np.maximum(k_i * pen[pi, ti] - c_i * v_n, 0.0)
-                v_t = v_rel - v_n[:, None] * n_hat
-                c_t = 2.0 * self.tangent_zeta * m_p * self.contact_omega
-                f_vec = f_n[:, None] * n_hat - c_t[:, None] * v_t
-
-                pellet_rows = NODES0 + self.net.n_nodes + pi
-                np.add.at(forces, pellet_rows, f_vec)
-                # Reaction onto the three spanning nodes, barycentric split.
-                for k in range(3):
-                    np.add.at(
-                        forces,
-                        NODES0 + tri[ti, k],
-                        -w_bary[:, k : k + 1] * f_vec,
-                    )
+            contacts = membrane_contact_forces(
+                forces,
+                node_pos,
+                node_vel,
+                node_rows=np.arange(self.net.n_nodes) + NODES0,
+                triangles=self.net.triangles,
+                pellet_pos=self.pos[self.pellets],
+                pellet_vel=self.vel[self.pellets],
+                pellet_rows=np.arange(self.cloud.n_pellets) + NODES0 + self.net.n_nodes,
+                pellet_radii=self.cloud.radii,
+                pellet_masses=self.cloud.masses,
+                omega=self.contact_omega,
+                zeta=self.contact_zeta,
+                tangent_zeta=self.tangent_zeta,
+            )
 
         # Tow thrust (continuous, on the chaser only, after the settle delay).
         if (
@@ -357,13 +416,7 @@ class CaptureSim:
             forces[CHASER] += self.chaser_mass * self.tow_accel * self._tow_dir
 
         accel = forces / self.mass[:, None]
-
-        # CW pseudo-accelerations, all bodies (linear -> fully vectorized).
-        x, z = self.pos[:, 0], self.pos[:, 2]
-        vx, vy = self.vel[:, 0], self.vel[:, 1]
-        accel[:, 0] += 3 * self.n**2 * x + 2 * self.n * vy
-        accel[:, 1] += -2 * self.n * vx
-        accel[:, 2] += -(self.n**2) * z
+        accel += cw_accelerations(self.pos, self.vel, self.n)
         return accel, tension, contacts
 
     # ------------------------------------------------------------------ phases

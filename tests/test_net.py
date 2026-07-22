@@ -1,6 +1,11 @@
 import numpy as np
 
-from orbdebris.net import build_net, closest_points_on_triangles, link_forces
+from orbdebris.net import (
+    build_funnel_net,
+    build_net,
+    closest_points_on_triangles,
+    link_forces,
+)
 
 
 def two_nodes(gap: float):
@@ -57,6 +62,50 @@ def test_build_net_topology():
     assert np.isclose(net.rest_lengths.max(), 2.0 * np.sqrt(2))
     # Membrane: every grid quad is two triangles.
     assert len(net.triangles) == 2 * (n - 1) ** 2
+
+
+def test_funnel_topology():
+    rings, sectors = 5, 8
+    net = build_funnel_net(
+        n_rings=rings, n_sectors=sectors, mouth_radius=5.0, length=12.0,
+        total_mass=20.0, mouth_mass=1.0,
+    )
+
+    assert net.n_nodes == rings * sectors + 1  # ring nodes + the apex
+    assert net.apex_node == rings * sectors
+    assert len(net.mouth_nodes) == sectors
+
+    # The mouth is the wide end at z=0; the apex is the tip at -length.
+    mouth = net.positions[net.mouth_nodes]
+    assert np.allclose(mouth[:, 2], 0.0)
+    assert np.allclose(np.linalg.norm(mouth[:, :2], axis=1), 5.0)
+    assert np.isclose(net.positions[net.apex_node, 2], -12.0)
+
+    # Radius must taper monotonically from mouth to apex.
+    radii = [
+        np.linalg.norm(net.positions[r * sectors : (r + 1) * sectors, :2], axis=1).mean()
+        for r in range(rings)
+    ]
+    assert np.all(np.diff(radii) < 0)
+
+    # The drawstring is exactly the mouth ring: one circumferential link per sector.
+    assert net.perimeter.sum() == sectors
+    drawstring_nodes = np.unique(net.links[net.perimeter].ravel())
+    assert set(drawstring_nodes) == set(net.mouth_nodes)
+
+    # A heavy rim: mouth nodes outweigh interior ones.
+    assert net.masses[net.mouth_nodes].min() > net.masses[net.apex_node]
+
+
+def test_funnel_membrane_is_closed_around_each_ring():
+    # Every sector must be spanned, or pellets leak through the gap.
+    net = build_funnel_net(n_rings=4, n_sectors=6, mouth_radius=3.0, length=6.0)
+    tri_nodes = set(net.triangles.ravel().tolist())
+    for node in range(net.n_nodes):
+        assert node in tri_nodes  # no node is left out of the surface
+    # The apex is closed by a fan of one triangle per sector.
+    apex_tris = (net.triangles == net.apex_node).any(axis=1).sum()
+    assert apex_tris == 6
 
 
 def test_closest_point_on_triangle_regions():

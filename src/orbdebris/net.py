@@ -34,6 +34,9 @@ class Net:
     perimeter: np.ndarray  # [L] bool: links forming the outer ring (drawstring)
     corners: np.ndarray  # [4] node indices of the corners (bridle attach points)
     triangles: np.ndarray  # [T, 3] node-index triples: the membrane surface
+    # Funnel nets only (build_funnel_net); None for the square net.
+    mouth_nodes: np.ndarray | None = None  # node indices on the mouth ring
+    apex_node: int | None = None  # node index at the funnel's tip
 
     @property
     def n_nodes(self) -> int:
@@ -98,6 +101,90 @@ def build_net(
         perimeter=np.array(perim),
         corners=corners,
         triangles=np.array(triangles),
+    )
+
+
+def build_funnel_net(
+    n_rings: int = 6,
+    n_sectors: int = 12,
+    mouth_radius: float = 5.0,
+    length: float = 12.0,
+    total_mass: float = 20.0,
+    mouth_mass: float = 1.0,
+) -> Net:
+    """Conical funnel: a wide mouth ring tapering back to a single apex node.
+
+    Local frame: the mouth ring lies in the x-y plane at z=0 and the funnel
+    extends toward -z, so +z is the direction the mouth faces (the direction
+    the constellation sweeps). Ring 0 is the mouth; the apex is one node.
+
+    Topology mirrors the square net: circumferential links around each ring,
+    longitudinal links between rings, shear diagonals, and a triangulated
+    membrane. The mouth ring's circumferential links are the drawstring
+    (``perimeter``), so cinching it closes the mouth exactly as the square
+    net's perimeter does.
+
+    mouth_mass is *added* to each mouth-ring node: a heavy rim resists the
+    mouth being deformed by debris impacts and gives the holding satellites
+    something substantial to pull against.
+    """
+    # Radius tapers linearly from mouth_radius to (almost) zero at the apex.
+    ring_r = np.linspace(mouth_radius, 0.0, n_rings + 1)[:-1]  # drop the 0 ring
+    ring_z = np.linspace(0.0, -length, n_rings + 1)[:-1]
+    theta = np.arange(n_sectors) * 2 * np.pi / n_sectors
+
+    positions = []
+    for r, z in zip(ring_r, ring_z):
+        for th in theta:
+            positions.append([r * np.cos(th), r * np.sin(th), z])
+    apex_node = len(positions)
+    positions.append([0.0, 0.0, -length])
+    positions = np.array(positions)
+
+    masses = np.full(len(positions), total_mass / len(positions))
+    mouth_nodes = np.arange(n_sectors)  # ring 0
+    masses[mouth_nodes] += mouth_mass
+
+    def idx(ring: int, sector: int) -> int:
+        return ring * n_sectors + (sector % n_sectors)
+
+    links: list[tuple[int, int]] = []
+    rests: list[float] = []
+    perim: list[bool] = []
+    triangles: list[tuple[int, int, int]] = []
+
+    def add(i: int, j: int, is_perimeter: bool = False) -> None:
+        links.append((i, j))
+        rests.append(float(np.linalg.norm(positions[i] - positions[j])))
+        perim.append(is_perimeter)
+
+    for ring in range(n_rings):
+        for s in range(n_sectors):
+            a = idx(ring, s)
+            b = idx(ring, s + 1)
+            add(a, b, is_perimeter=(ring == 0))  # circumferential; ring 0 = drawstring
+            if ring + 1 < n_rings:
+                c = idx(ring + 1, s)
+                d = idx(ring + 1, s + 1)
+                add(a, c)  # longitudinal
+                add(a, d)  # shear
+                triangles.append((a, b, d))
+                triangles.append((a, d, c))
+            else:
+                # Last ring closes onto the apex as a fan of triangles.
+                add(a, apex_node)
+                triangles.append((a, b, apex_node))
+
+    return Net(
+        positions=positions,
+        masses=masses,
+        links=np.array(links),
+        rest_lengths=np.array(rests),
+        perimeter=np.array(perim),
+        corners=mouth_nodes,  # satellites bond here (3 of them, 120 deg apart)
+        triangles=np.array(triangles),
+        mouth_nodes=mouth_nodes,
+        apex_node=apex_node,
     )
 
 
