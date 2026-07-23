@@ -65,8 +65,12 @@ to this order.
       whole time.** Reuses the M3 engine (contact, pellets, CW) via a shared
       force core; new work is the conical membrane, the velocity-limited PD
       formation controller, the approach, and the one-way storage box.
-      *Result:* 18/30 stored and settled in the box, mouth held at 3.8 m,
-      ~8.7 m/s formation-keeping for the whole operation.
+      The membrane is a **tetrahedron** (3 flat faces, open triangular mouth)
+      whose corners are the three mouth satellites, and the apex satellite *is*
+      the collector - a compartment sized like the satellite itself.
+      *Result:* 21/30 debris stored in the 1 m collector, funnel at 99% of its
+      design length, mouth held open throughout, 3.2 m/s formation-keeping for
+      the whole operation.
       *Physics note:* burning prograde to "speed up and catch from behind" is
       the M1 trap in CW clothing — `ẍ = +2nẏ` balloons you radially (a 2 m/s
       prograde burn drifts +539 m up in 500 s and still misses). The CW solve
@@ -98,18 +102,13 @@ to this order.
   bond, not a modelled boom; the apex storage box is a soft one-way constraint,
   not a modelled hatch or valve; the membrane's wrinkle model is an area-ratio
   gate, not true buckling.
-- **The funnel under-deploys axially** — the known top issue. Measured: it
-  reaches 8.1 m of its 16 m design length (51%), so the working half-angle is
-  ~25° instead of the designed 14°, and impacts are steeper than the glancing
-  regime the concept wants. Nothing tensions the cone lengthwise: the three
-  satellites hold the *mouth ring*, but the apex end is only carried along, so
-  the membrane stays partly folded. Worse, `trim_slots()` (which fixed the
-  40 m/s tug-of-war) then *accepts that shortened shape as the target*, locking
-  the under-deployment in. This is most of the gap between end-to-end
-  collection (18/30) and the isolated, fully-extended funnel (~29/30). Fix
-  direction: tension the funnel axially during deploy (the apex satellite pulls
-  back to full extension) before trimming, or trim only the radial slot
-  components so axial extension is still commanded.
+- **Collection is 21/30, not 30/30.** The remaining nine are debris that missed
+  the mouth on the pass or are still sliding down the walls when the run ends -
+  not a modelling failure. Longer collect time and sweep aim are the levers.
+  (The under-deployment that used to cap this is fixed: see the tensioning
+  decision above.)
+- **The collector is a soft one-way constraint plus padding**, not a modelled
+  hatch with a door that opens and closes on command.
 - **Orbits:** two-body only — no J2, no drag, no SRP. This is why
   station-keeping costs ~0.1 m/s/year here; real LEO station-keeping is
   dominated by drag make-up, and differential ballistic coefficients between
@@ -233,6 +232,40 @@ to this order.
   must only retain debris that has *entered* it (a one-way latch); constraining
   everything outside its radius made it a tractor beam that sucked in the whole
   cloud from 20 m away. Decided 2026-07-23.
+- **The funnel is a tetrahedron, not a cone** (the author, from watching the
+  animation): 3 flat triangular faces + an open triangular mouth, its corners
+  held by the three mouth satellites. Its shape is then *exactly* the
+  tetrahedron of the four satellite positions, so commanding the formation is
+  commanding the geometry - and the concertina fold below becomes structurally
+  impossible (a taut membrane can sag inward, never fold back axially). Mouth
+  edges are straight lines between held corners, so the circular rim's
+  sag-between-supports is gone, and the `n_sectors % 3` guard disappears
+  because 3 corners is native. Sizing: corners at 6.2 m give the triangular
+  mouth the same ~50 m^2 area as the old 4 m circle (a triangle covers only
+  ~41% of its circumscribed circle) - and because the *inradius* (R/2) sets the
+  face inclination, the area-matched tetrahedron presents ~11 deg faces where
+  the cone presented 14: shallower, more glancing, exactly the capture
+  condition. Decided 2026-07-23.
+- **The funnel must be tensioned lengthwise** (the apex satellite's thruster
+  pulls backward): nothing else stretches it. Without it the cone
+  **concertina'd** - folding back on itself at mid-length, reaching 51% of its
+  design length with its smallest ring 1.9 m *behind* the apex, while every
+  radius still looked correct. Working half-angle was 25 deg instead of 14.
+  With tensioning: 99% extension for ~1.1 m/s. `funnel_extension()` is the
+  diagnostic that would have caught it instantly, and it is now a regression
+  test. Note the order matters - tension *before* `trim_slots()`, or the trim
+  accepts the folded shape as its target. Decided 2026-07-23.
+- **Slippery chute, padded catch** (the author's fix for delivery): a funnel
+  *concentrates* debris but, with no gravity, cannot *deliver* it - each pellet
+  slides until the walls absorb its motion and then parks wherever it stopped,
+  strung out along the cone (measured: 1/30 inside a 1 m collector, debris
+  spread 0.8-14 m along a 16 m funnel). Pushing them apex-ward only wedges them
+  into the narrowing walls. The fix is to move the dissipation: make the
+  membrane nearly frictionless *tangentially* so debris keeps sliding home
+  (tangent_zeta 0.05 -> 0.005: 8/30 -> 26/30 within 1 m in isolation, median
+  distance 2.2 -> 0.4 m), and pad the *collector* so arriving debris is damped
+  to rest there. Normal damping stays high throughout - that is what stops
+  bouncing. Decided 2026-07-23.
 - **Trim the controller to the structure it holds:** the membrane's settled rim
   radius sits slightly inside the as-built blueprint, so slots at the blueprint
   radius leave the controller leaning on the structure forever (~40 m/s of

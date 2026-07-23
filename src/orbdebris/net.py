@@ -104,6 +104,101 @@ def build_net(
     )
 
 
+def build_tetra_net(
+    mouth_radius: float = 6.2,
+    length: float = 16.0,
+    subdiv: int = 6,
+    total_mass: float = 20.0,
+    corner_mass: float = 1.0,
+) -> Net:
+    """Tetrahedral funnel: three flat triangular faces meeting at an apex, with
+    an open triangular mouth. Same local frame as the cone (mouth in the x-y
+    plane at z=0, apex at -length, so +z is the sweep direction).
+
+    Why a tetrahedron rather than a cone: its shape is *exactly* the tetrahedron
+    defined by the four satellite positions - 3 mouth corners + 1 apex - so
+    commanding the formation IS commanding the funnel geometry. A cone's mouth
+    is a circle with only three support points (it sags between them) and its
+    surface is unsupported along its length, which is where the cone
+    concertina'd - folding back on itself and reaching only 51% of its design
+    length. A taut tetrahedron can sag inward but cannot fold back axially.
+
+    Sizing note: a triangle inscribed at circumradius R has area (3*sqrt3/4)R^2,
+    only ~41% of the circle's pi*R^2, so R is chosen larger for equal capture
+    area. The *impact angle* is set by the faces' distance from the axis - the
+    inradius R/2 - so an equal-area tetrahedron actually presents shallower
+    (more glancing) faces than the cone it replaces.
+    """
+    r, depth = float(mouth_radius), float(length)
+    theta = np.arange(3) * 2 * np.pi / 3
+    mouth_corners = np.column_stack([r * np.cos(theta), r * np.sin(theta), np.zeros(3)])
+    apex_pos = np.array([0.0, 0.0, -depth])
+
+    # Deduplicate nodes shared along the three corner->apex seams.
+    positions: list[np.ndarray] = []
+    index: dict[tuple, int] = {}
+
+    def node(p: np.ndarray) -> int:
+        key = tuple(np.round(p, 6))
+        if key not in index:
+            index[key] = len(positions)
+            positions.append(np.asarray(p, dtype=float))
+        return index[key]
+
+    triangles: list[tuple[int, int, int]] = []
+    for f in range(3):
+        a, b, c = mouth_corners[f], mouth_corners[(f + 1) % 3], apex_pos
+        # Barycentric lattice over the face: rows i from the mouth edge (a-b)
+        # down to the apex, each row one node shorter.
+        rows: list[list[int]] = []
+        for i in range(subdiv + 1):
+            row = []
+            for j in range(subdiv - i + 1):
+                w_c = i / subdiv
+                rem = 1.0 - w_c
+                w_b = rem * (j / (subdiv - i)) if subdiv - i > 0 else 0.0
+                w_a = rem - w_b
+                row.append(node(w_a * a + w_b * b + w_c * c))
+            rows.append(row)
+        for i in range(subdiv):
+            upper, lower = rows[i], rows[i + 1]
+            for j in range(len(lower)):
+                triangles.append((upper[j], upper[j + 1], lower[j]))
+                if j + 1 < len(lower):
+                    triangles.append((upper[j + 1], lower[j + 1], lower[j]))
+
+    positions = np.array(positions)
+    tri = np.array(triangles)
+
+    # Links = unique triangulation edges.
+    edges = set()
+    for t in tri:
+        for u, v in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            edges.add((min(u, v), max(u, v)))
+    links = np.array(sorted(edges))
+    rests = np.linalg.norm(positions[links[:, 0]] - positions[links[:, 1]], axis=1)
+
+    corners = np.array([node(p) for p in mouth_corners])
+    apex_node = node(apex_pos)
+    mouth_nodes = np.flatnonzero(np.isclose(positions[:, 2], 0.0))
+    on_mouth = np.isin(links[:, 0], mouth_nodes) & np.isin(links[:, 1], mouth_nodes)
+
+    masses = np.full(len(positions), total_mass / len(positions))
+    masses[corners] += corner_mass
+
+    return Net(
+        positions=positions,
+        masses=masses,
+        links=links,
+        rest_lengths=rests,
+        perimeter=on_mouth,
+        corners=corners,
+        triangles=tri,
+        mouth_nodes=mouth_nodes,
+        apex_node=int(apex_node),
+    )
+
+
 def build_funnel_net(
     n_rings: int = 8,
     n_sectors: int = 12,

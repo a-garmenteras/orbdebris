@@ -94,7 +94,7 @@ def funnel_demo(n_pellets: int = 30, seed: int = 11, standoff: float = 10.0):
     """
     from orbdebris.constants import GM_EARTH, R_EARTH
     from orbdebris.debris import make_pellet_cloud
-    from orbdebris.net import build_funnel_net
+    from orbdebris.net import build_tetra_net
     from orbdebris.relative import cw_propagate, mean_motion
 
     n = mean_motion(R_EARTH + 500.0, GM_EARTH)
@@ -107,13 +107,12 @@ def funnel_demo(n_pellets: int = 30, seed: int = 11, standoff: float = 10.0):
     _, sweep_velocity = cw_propagate(behind, burn, tof, n)
     sweep_dir = sweep_velocity / np.linalg.norm(sweep_velocity)
 
-    # Narrow, long cone (~14 deg half-angle) so wall impacts stay glancing. The
-    # fabric is a continuous membrane (shell elements) so the cone holds its
-    # shape - a cord-only net collapses and leaks (isolated test: 16-18/30
-    # cords vs 29/30 with the membrane).
-    net = build_funnel_net(
-        n_rings=8, n_sectors=12, mouth_radius=4.0, length=16.0, total_mass=60.0
-    )
+    # Tetrahedral funnel: 3 flat faces + open triangular mouth, its shape fixed
+    # by the 4 satellite positions (so it cannot concertina like the cone did).
+    # Corners at 6.2 m match the old 4 m circular mouth's area while presenting
+    # shallower ~11 deg faces. The fabric is a continuous membrane (shell
+    # elements) - a cord-only net collapses and leaks.
+    net = build_tetra_net(mouth_radius=6.2, length=16.0, subdiv=6, total_mass=60.0)
     cloud = make_pellet_cloud(n_pellets=n_pellets, sigma_pos=1.0, seed=seed)
     sim = FunnelSim.from_hill_state(
         net,
@@ -121,13 +120,14 @@ def funnel_demo(n_pellets: int = 30, seed: int = 11, standoff: float = 10.0):
         n,
         chaser_rel_r_km=(-standoff * sweep_dir) / 1000.0,  # standoff before the cloud
         chaser_rel_v_km=np.zeros(3),
-        mouth_radius=4.0,
+        mouth_radius=6.2,
         funnel_length=16.0,
-        # Energy-absorbing skin: inelastic normal contact, low tangential drag
-        # so glancing debris slides down to the apex box (Checkpoint 1 test).
+        # Slippery chute, padded catch: inelastic normal contact (no bounce)
+        # with near-frictionless tangential sliding, so debris runs all the way
+        # down to the collector, whose padded walls absorb the arrival.
         contact_omega=150.0,
         contact_zeta=0.95,
-        tangent_zeta=0.05,
+        tangent_zeta=0.005,
         capture_frac=0.5,
     )
     approach = {"burn": burn, "tof": tof, "sweep_velocity": sweep_velocity}
@@ -247,6 +247,7 @@ class FunnelResult:
     net: Net
     pellet_radii: np.ndarray
     n_nodes: int
+    box_radius: float = 1.0  # collector aperture, for drawing
 
     @property
     def sats(self) -> slice:
@@ -283,23 +284,39 @@ class FunnelSim:
     # Satellite-to-net bonds (stiff: the satellites *are* the mouth's frame).
     k_bond: float = 800.0
     c_bond: float = 30.0
-    # Membrane contact: high normal damping (inelastic - absorb the impact,
-    # no bounce), low tangential damping (glancing debris slides on toward the
-    # apex). See tests/test_capture.py::...absorbs_normal...glancing_debris_slide.
+    # Membrane contact, split by direction. Normal: heavily damped (inelastic -
+    # absorb the perpendicular impact so debris does not bounce back out).
+    # Tangential: nearly frictionless, so debris keeps sliding *along* the wall
+    # all the way down to the collector. The funnel is a slippery chute, not a
+    # sticky one: at tangent_zeta 0.05 debris parks strung out along the cone
+    # (8/30 reach a 1 m collector, median 2.2 m); at 0.005 it slides home
+    # (26/30, median 0.4 m). The energy is absorbed at the *collector* instead,
+    # whose walls are padded - see box_damping.
     contact_omega: float = 150.0
     contact_zeta: float = 0.95
-    tangent_zeta: float = 0.05
+    tangent_zeta: float = 0.005
     enable_contact: bool = True
     # Formation control (velocity-limited PD; see FormationController).
     kp: float = 0.05
     kv: float = 0.5
     v_max: float = 0.15
     max_accel: float = 0.05
-    # Apex storage box: a soft one-way cod-end container at the apex node
-    # (radius ~= the last few metres of the funnel). Debris can enter but a
-    # boundary spring pushes back any that tries to drift out.
-    box_radius: float = 3.5
+    # Apex tensioning: the apex satellite's thruster pulls *backward* along the
+    # funnel axis to unfurl it completely. Without it nothing tensions the
+    # funnel lengthwise - the membrane stays folded and the cone concertinas to
+    # half its design length (measured 51%, folding back on itself).
+    apex_tension_accel: float = 0.06  # [m/s^2] backward pull during deploy
+    extension_target: float = 0.95  # stop pulling at this fraction of design
+    # The apex satellite IS the collector: a compartment that opens and closes,
+    # so the "stored" radius is the satellite's own size, not an arbitrary
+    # volume. Debris can enter but a boundary spring pushes back any that
+    # tries to drift out.
+    box_radius: float = 1.0
     box_k: float = 30.0  # container-wall stiffness [N/m per unit mass-scaling]
+    # Padded compartment walls: debris arriving off a near-frictionless funnel
+    # still carries its sliding speed, so the collector is where that energy is
+    # absorbed. Damping rate [1/s] on debris inside the compartment.
+    box_damping: float = 3.0
     # Shepherding: an OPTIONAL gentle forward accel. Off by default: the sweep
     # motion alone funnels debris to the apex (a fixed-node test collects 30/30
     # with zero shepherding). Nonzero shepherding actually drives debris into
@@ -358,12 +375,10 @@ class FunnelSim:
         The chaser starts as a single body; call split() to become four."""
         if net.mouth_nodes is None or net.apex_node is None:
             raise ValueError("FunnelSim needs a funnel net (see net.build_funnel_net).")
-        if len(net.mouth_nodes) % len(MOUTH_SATS) != 0:
+        if len(net.corners) < len(MOUTH_SATS):
             raise ValueError(
-                f"n_sectors ({len(net.mouth_nodes)}) must be divisible by "
-                f"{len(MOUTH_SATS)} so the mouth satellites sit 120 deg apart. "
-                "Otherwise one arc of the rim is left oversized and unsupported, "
-                "and it sags badly inward - tension-only cords cannot push it back out."
+                f"the funnel needs at least {len(MOUTH_SATS)} corner nodes for the "
+                f"mouth satellites to hold, got {len(net.corners)}."
             )
         sim = cls(net=net, cloud=cloud, n=n, **params)
         b = N_SATS + net.n_nodes + cloud.n_pellets
@@ -480,11 +495,12 @@ class FunnelSim:
         self._hold_target = self.pos[self.sats].mean(axis=0).copy()
 
     def _attach_bonds(self) -> None:
-        """Bond the 3 mouth satellites to their rim nodes (120 deg apart) and
-        the 4th to the apex, with short stiff tension-only links."""
-        mouth = self.net.mouth_nodes
-        step = len(mouth) // len(MOUTH_SATS)
-        bonds = [[MOUTH_SATS[k], N_SATS + int(mouth[k * step])] for k in range(len(MOUTH_SATS))]
+        """Bond each mouth satellite to its corner of the funnel's mouth, and
+        the 4th to the apex, with short stiff tension-only links. For a
+        tetrahedron the three corners *are* the satellite stations, so the four
+        bonds pin the whole shape - which is the point of the tetrahedron."""
+        corners = self.net.corners[: len(MOUTH_SATS)]
+        bonds = [[MOUTH_SATS[k], N_SATS + int(corners[k])] for k in range(len(MOUTH_SATS))]
         bonds.append([APEX_SAT, N_SATS + int(self.net.apex_node)])
         self._bonds = np.array(bonds)
         self._bond_rest = np.full(len(bonds), 0.05)  # short, stiff: sats hold the rim
@@ -580,8 +596,31 @@ class FunnelSim:
             # forever (measured: 40 m/s of formation dv from exactly this).
             forces[apex_row] += f_vec.sum(axis=0)
 
+        # Padded compartment: debris that has arrived is brought to rest against
+        # the apex satellite. The funnel walls are deliberately slippery so
+        # debris keeps sliding home; *this* is where its energy is absorbed.
+        inside = self._in_box & (d < self.box_radius)
+        if np.any(inside):
+            ins = np.flatnonzero(inside)
+            v_rel = self.vel[self.pellets][ins] - apex_vel
+            f_pad = -self.box_damping * self.cloud.masses[ins, None] * v_rel
+            forces[pel_rows[ins]] += f_pad
+            forces[apex_row] -= f_pad.sum(axis=0)  # padding pushes back, too
+
         accel = forces / self.mass[:, None]
         accel += cw_accelerations(self.pos, self.vel, self.n)
+
+        # Apex tensioning: the 4th satellite's thruster pulls backward along the
+        # funnel axis, unfurling the membrane to its full design length. Runs
+        # only while the funnel is short of extension_target, so it stops once
+        # the funnel is taut instead of thrusting forever.
+        if (
+            self.apex_tension_accel > 0
+            and self._phase in (APPROACH, SPLIT)
+            and self.funnel_extension() < self.extension_target
+        ):
+            accel[APEX_SAT] -= self.apex_tension_accel * self._basis[2]
+            self.ctrl.dv_spent[APEX_SAT] += self.apex_tension_accel * dt
 
         # Shepherding: a gentle continuous forward thrust on the whole formation
         # once the sweep is engulfing the cloud. In the funnel's frame this is a
@@ -628,6 +667,25 @@ class FunnelSim:
     def mouth_radius_now(self) -> float:
         mouth = self.pos[N_SATS + self.net.mouth_nodes]
         return float(np.linalg.norm(mouth - mouth.mean(axis=0), axis=1).mean())
+
+    def mouth_corner_radius(self) -> float:
+        """Mean distance of the three held *corners* from the mouth centroid -
+        the meaningful "is the mouth open?" measure for a triangular mouth.
+        (``mouth_radius_now`` averages the whole perimeter, which for a triangle
+        mixes corners at R with edge midpoints at R/2, so a fully open
+        triangular mouth reads only ~0.75 R there.)"""
+        mouth = self.pos[N_SATS + self.net.mouth_nodes]
+        corners = self.pos[N_SATS + self.net.corners[: len(MOUTH_SATS)]]
+        return float(np.linalg.norm(corners - mouth.mean(axis=0), axis=1).mean())
+
+    def funnel_extension(self) -> float:
+        """Deployed axial length / design length. The diagnostic that would
+        have caught the concertina fold instantly: the folded cone read 0.51
+        while its radii all looked correct."""
+        mouth_c = self.pos[N_SATS + self.net.mouth_nodes].mean(axis=0)
+        apex = self.pos[N_SATS + self.net.apex_node]
+        axial = abs((mouth_c - apex) @ self._basis[2])
+        return float(axial / self.funnel_length)
 
     def stored_mask(self) -> np.ndarray:
         """Boolean [P]: pellets collected in the apex box - they have entered it
@@ -757,4 +815,5 @@ class FunnelSim:
             net=self.net,
             pellet_radii=self.cloud.radii.copy(),
             n_nodes=self.net.n_nodes,
+            box_radius=self.box_radius,
         )

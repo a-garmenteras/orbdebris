@@ -80,8 +80,8 @@ def plot(result) -> None:
                    label="pellets (stored)")
         # The storage box: a soft one-way container mounted at the apex node.
         apex = pos[N_SATS + net.apex_node]
-        ax.add_patch(plt.Circle((apex[i], apex[j]), 3.5, fill=False, color="tab:red",
-                                ls="--", lw=1.0, alpha=0.6))
+        ax.add_patch(plt.Circle((apex[i], apex[j]), result.box_radius, fill=False,
+                                color="tab:red", ls="--", lw=1.0, alpha=0.6))
         sats = pos[result.sats]
         ax.scatter(sats[MOUTH_SATS, i], sats[MOUTH_SATS, j], s=60, marker="s",
                    color="tab:green", zorder=4, label="mouth sats")

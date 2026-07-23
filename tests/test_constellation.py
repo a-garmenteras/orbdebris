@@ -15,7 +15,7 @@ from orbdebris.constellation import (
 )
 from orbdebris.constants import GM_EARTH, R_EARTH
 from orbdebris.debris import make_pellet_cloud
-from orbdebris.net import build_funnel_net
+from orbdebris.net import build_tetra_net
 from orbdebris.relative import cw_propagate, mean_motion
 
 N_REF = mean_motion(R_EARTH + 500.0, GM_EARTH)
@@ -23,8 +23,8 @@ PERIOD = 2 * np.pi / N_REF
 
 
 def make_sim(**params) -> FunnelSim:
-    # n_sectors must be divisible by 3 so the mouth satellites sit 120 deg apart.
-    net = build_funnel_net(n_rings=5, n_sectors=12, mouth_radius=5.0, length=12.0)
+    # A small tetrahedral funnel: 3 corners are native, no divisibility needed.
+    net = build_tetra_net(mouth_radius=5.0, length=12.0, subdiv=5)
     cloud = make_pellet_cloud(n_pellets=12, sigma_pos=1.2, seed=17)
     params.setdefault("mouth_radius", 5.0)  # match the net built above
     params.setdefault("funnel_length", 12.0)
@@ -131,37 +131,98 @@ def test_formation_holds_the_mouth_open_and_it_costs_fuel():
     result = sim.run(duration=120.0, dt=0.005, record_every=200)
 
     assert result.formation_error[-1] < 0.3  # trimmed slots are reachable
-    assert result.mouth_radius[-1] > 4.0  # mouth held open (~5 m as built)
+    # A triangular mouth: measure the held corners, not the perimeter mean
+    # (which mixes corners at R with edge midpoints at R/2).
+    assert sim.mouth_corner_radius() > 0.8 * sim.mouth_radius
     assert result.formation_dv[-1] > 0.0  # it is not free
     assert np.all(np.diff(result.formation_dv) >= -1e-12)  # monotonic spend
 
 
-def test_membrane_holds_the_rim_round():
-    """With a continuous membrane (shell elements) the rim stays *round*: the
-    balloon skin transmits the three satellites' pull all the way around, so
-    the deep sag-between-supports of a tension-only cord rim is gone. (The old
-    cord-only funnel sagged from 5.0 to ~3.5 m between supports - that sag is
-    exactly why it leaked debris.)"""
+def test_apex_thruster_unfurls_the_funnel_completely():
+    """THE regression guard for the concertina bug. Without axial tensioning
+    the cone folded back on itself at mid-length, reaching only 51% of its
+    design length with its smallest ring 1.9 m *behind* the apex - while every
+    radius still looked correct. Assert both: full extension, and that no part
+    of the funnel has folded behind the apex."""
+    sim, sweep_velocity, _ = funnel_demo()
+    sim.split()
+    sim.hold_position()
+    sim.run(50.0, dt=0.0015, record_every=100_000)
+
+    assert sim.funnel_extension() > 0.9  # was 0.51 when it concertina'd
+
+    nodes = sim.pos[sim.nodes]
+    apex = nodes[sim.net.apex_node]
+    axial = (nodes - apex) @ sim._basis[2]
+    assert axial.min() > -0.5  # nothing folded behind the apex (was -1.91 m)
+
+    # Radius grows with axial distance from the apex: a single funnel, not two
+    # nested sections. (Corners sit at R and edge midpoints at R/2, so compare
+    # bin maxima rather than individual nodes.)
+    radius = np.linalg.norm((nodes - apex) - axial[:, None] * sim._basis[2], axis=1)
+    bins = np.linspace(0, axial.max(), 6)
+    maxima = [radius[(axial >= lo) & (axial < hi)].max()
+              for lo, hi in zip(bins[:-1], bins[1:]) if ((axial >= lo) & (axial < hi)).any()]
+    assert all(b >= a - 0.3 for a, b in zip(maxima, maxima[1:]))
+
+    assert sim.mouth_corner_radius() > 0.8 * sim.mouth_radius  # mouth held open
+
+
+def test_apex_tensioning_costs_fuel_and_then_stops():
+    """The thruster is a deploy aid, not a permanent burn: it must cost real
+    delta-v and then switch off once the funnel is taut."""
+    sim, _, _ = funnel_demo()
+    sim.split()
+    sim.hold_position()
+    sim.run(50.0, dt=0.0015, record_every=100_000)
+    spent_after_deploy = float(sim.ctrl.dv_spent[APEX_SAT])
+
+    assert spent_after_deploy > 0.0  # tensioning is not free
+    assert sim.funnel_extension() >= sim.extension_target - 0.05
+
+    # Once extended it stops pulling: the apex accrues no *tensioning* dv.
+    before = float(sim.ctrl.dv_spent[APEX_SAT])
+    sim.run(10.0, dt=0.0015, record_every=100_000)
+    assert float(sim.ctrl.dv_spent[APEX_SAT]) - before < 0.3
+
+
+def test_satellites_bond_to_the_mouth_corners():
+    """The tetrahedron's whole point: the three mouth satellites hold the three
+    corners, so the four satellites pin the entire shape."""
+    sim, sweep_velocity, _ = funnel_demo()
+    sim.deploy_open(sweep_velocity)
+
+    bonded_nodes = sorted(int(b[1]) - N_SATS for b in sim._bonds)
+    expected = sorted(list(sim.net.corners[: len(MOUTH_SATS)]) + [sim.net.apex_node])
+    assert bonded_nodes == [int(x) for x in expected]
+
+
+def test_membrane_keeps_the_mouth_triangle_open():
+    """The tetrahedron's mouth is a triangle held at its three corners, so the
+    membrane's job is to keep those corners out at the design radius and the
+    edges taut between them - no sag-between-supports (the circular rim of the
+    old cone sagged from 5.0 to ~1.5 m between its three supports, which is why
+    it leaked)."""
     sim = make_sim(enable_contact=False)
     sim.split()
     sim.run(duration=250.0, dt=0.005, record_every=5000)
 
+    assert sim.mouth_corner_radius() > 0.8 * sim.mouth_radius  # corners held out
+
+    # Mouth nodes lie between the inradius (edge midpoints) and the circumradius
+    # (corners): a taut triangle, not a collapsed one.
     mouth = sim.pos[N_SATS + sim.net.mouth_nodes]
-    radii = np.linalg.norm(mouth - mouth.mean(axis=0), axis=1)
-
-    # Measured: bonded nodes ~4.68 (pulled slightly in), free arcs ~5.27
-    # (bowed slightly out by the membrane) - round to within ~12%, versus the
-    # cord-only rim collapsing to ~1.5 m between supports.
-    assert radii.min() > 4.5  # near the built 5 m everywhere on the ring
-    assert radii.min() > 0.85 * radii.max()  # round: no deep inter-support sag
+    d = np.linalg.norm(mouth - mouth.mean(axis=0), axis=1)
+    assert d.min() > 0.35 * sim.mouth_radius  # inradius is R/2; allow some sag
 
 
-def test_mouth_satellites_must_divide_the_rim_evenly():
-    """A rim whose sectors do not divide by 3 leaves one oversized unsupported
-    arc, which sags badly. Fail loudly rather than quietly capture less."""
-    net = build_funnel_net(n_rings=4, n_sectors=10, mouth_radius=5.0, length=12.0)
+def test_funnel_needs_enough_corners_for_the_mouth_satellites():
+    """Fail loudly if the funnel has fewer corner stations than mouth
+    satellites to hold them."""
+    net = build_tetra_net(mouth_radius=5.0, length=12.0, subdiv=4)
+    net.corners = net.corners[:2]  # pretend a malformed funnel
     cloud = make_pellet_cloud(n_pellets=5, seed=1)
-    with pytest.raises(ValueError, match="divisible"):
+    with pytest.raises(ValueError, match="corner"):
         FunnelSim.from_hill_state(net, cloud, N_REF, np.array([0.0, -1.0, 0.0]), np.zeros(3))
 
 
@@ -197,6 +258,32 @@ def test_apex_box_forces_are_internal():
     assert np.linalg.norm(net_force) < 1e-9
 
 
+def test_padded_collector_brings_arriving_debris_to_rest():
+    """The funnel walls are deliberately slippery so debris slides all the way
+    home; the collector is where that energy is absorbed. Debris arriving with
+    speed must be damped to rest inside the compartment, not rattle around."""
+    sim, sweep_velocity, _ = funnel_demo()
+    sim.deploy_open(np.zeros(3))
+    apex_row = N_SATS + sim.net.apex_node
+
+    sim.pos[sim.pellets] = sim.pos[apex_row] + np.array([0.0, 0.0, 60.0])  # park the rest
+    sim.vel[sim.pellets] = 0.0
+    p0 = N_SATS + sim.net.n_nodes
+    sim.pos[p0] = sim.pos[apex_row] + np.array([0.0, 0.0, 0.3 * sim.box_radius])
+    sim.vel[p0] = sim.vel[apex_row] + np.array([0.25, 0.0, 0.0])  # arrives sliding
+    sim._in_box[0] = True
+    sim.enable_contact = False
+
+    for _ in range(3000):
+        accel, _ = sim._accelerations(0.0, 0.0015)
+        sim.vel += accel * 0.0015
+        sim.pos += sim.vel * 0.0015
+
+    v_rel = np.linalg.norm(sim.vel[p0] - sim.vel[apex_row])
+    assert v_rel < 0.02  # padded to rest
+    assert np.linalg.norm(sim.pos[p0] - sim.pos[apex_row]) < sim.box_radius + 0.2
+
+
 def test_apex_box_is_one_way():
     """The storage box lets debris in but not out: a pellet parked just inside
     the box with a small outward velocity must be pushed back, not escape."""
@@ -205,11 +292,13 @@ def test_apex_box_is_one_way():
     apex_row = N_SATS + sim.net.apex_node
     apex = sim.pos[apex_row]
 
-    # Put one pellet just inside the box moving outward; freeze the rest far off.
+    # Put one pellet just inside the collector moving outward; park the rest far
+    # away. The collector is the apex satellite's compartment, so it is only a
+    # metre or so across.
     sim.pos[sim.pellets] = apex + np.array([0.0, 0.0, 50.0])  # everyone else parked away
     sim.vel[sim.pellets] = 0.0
     p0 = N_SATS + sim.net.n_nodes  # first pellet row
-    sim.pos[p0] = apex + np.array([0.0, 0.0, 1.0])  # 1 m out, inside box_radius=1.8
+    sim.pos[p0] = apex + np.array([0.0, 0.0, 0.5 * sim.box_radius])  # inside the compartment
     sim.vel[p0] = sim.vel[apex_row] + np.array([0.0, 0.0, 0.6])  # drifting outward
 
     sim.enable_contact = False  # isolate the box constraint from membrane hits

@@ -355,7 +355,9 @@ def animate_funnel(
         (pst,) = ax.plot([], [], "o", color="tab:red", ms=5, label="pellets (stored)")
         (msat,) = ax.plot([], [], "s", color="tab:green", ms=8, label="mouth sats")
         (asat,) = ax.plot([], [], "D", color="tab:red", ms=8, label="apex sat")
-        box = plt.Circle((0, 0), 3.5, fill=False, color="tab:red", ls="--", lw=0.9, alpha=0.6)
+        box = plt.Circle(
+            (0, 0), result.box_radius, fill=False, color="tab:red", ls="--", lw=0.9, alpha=0.6
+        )
         ax.add_patch(box)
         artists[ax] = (lc, pel, pst, msat, asat, box, i, j)
     ax_xy.legend(loc="upper right", fontsize=7)

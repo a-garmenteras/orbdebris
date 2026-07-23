@@ -3,6 +3,7 @@ import numpy as np
 from orbdebris.net import (
     build_funnel_net,
     build_net,
+    build_tetra_net,
     closest_points_on_triangles,
     link_forces,
     membrane_element_forces,
@@ -108,6 +109,70 @@ def test_funnel_membrane_is_closed_around_each_ring():
     # The apex is closed by a fan of one triangle per sector.
     apex_tris = (net.triangles == net.apex_node).any(axis=1).sum()
     assert apex_tris == 6
+
+
+def test_tetra_topology():
+    """The tetrahedron's shape is exactly the tetrahedron of the 4 satellites:
+    3 mouth corners 120 deg apart plus one apex."""
+    r, length = 6.2, 16.0
+    net = build_tetra_net(mouth_radius=r, length=length, subdiv=6)
+
+    assert len(net.corners) == 3
+    corners = net.positions[net.corners]
+    assert np.allclose(corners[:, 2], 0.0)  # mouth lies in the z=0 plane
+    assert np.allclose(np.linalg.norm(corners[:, :2], axis=1), r)
+    assert np.allclose(corners.sum(axis=0), 0.0, atol=1e-9)  # 120 deg apart -> balanced
+    assert np.allclose(net.positions[net.apex_node], [0.0, 0.0, -length])
+
+
+def test_tetra_is_a_closed_surface_except_the_mouth():
+    """Every interior edge must be shared by exactly two triangles; only the
+    mouth boundary is open. A hole anywhere else would leak debris."""
+    from collections import Counter
+
+    net = build_tetra_net(subdiv=6)
+    shared = Counter()
+    for t in net.triangles:
+        for u, v in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            shared[(min(u, v), max(u, v))] += 1
+
+    counts = Counter(shared.values())
+    assert set(counts) == {1, 2}  # boundary edges and interior edges only
+    boundary = [e for e, c in shared.items() if c == 1]
+    # The open boundary is precisely the mouth.
+    mouth = set(net.mouth_nodes.tolist())
+    assert all(u in mouth and v in mouth for u, v in boundary)
+
+
+def test_tetra_mouth_edges_are_straight_between_held_corners():
+    """The reason for the tetrahedron: the mouth's edges are straight lines
+    between the three satellite-held corners, so there is no sag-between-
+    supports like a circular rim has (measured 4.68 vs 5.27 on the cone)."""
+    r = 6.2
+    net = build_tetra_net(mouth_radius=r, length=16.0, subdiv=6)
+    mouth = net.positions[net.mouth_nodes]
+
+    # Every mouth node sits on one of the three straight edges, so its distance
+    # from the axis is between the inradius (edge midpoints) and circumradius.
+    dist = np.linalg.norm(mouth[:, :2], axis=1)
+    assert dist.max() <= r + 1e-9
+    assert dist.min() >= r / 2 - 1e-9  # inradius = R/2 for an equilateral triangle
+
+
+def test_tetra_faces_are_shallower_than_the_cone_it_replaces():
+    """Equal capture area, gentler impacts: the face inclination is set by the
+    inradius (R/2), so an area-matched tetrahedron presents ~11 deg faces where
+    the cone presented 14 deg - more glancing, which is the capture condition."""
+    r, length = 6.2, 16.0
+    tetra_angle = np.degrees(np.arctan((r / 2) / length))
+    cone_angle = np.degrees(np.arctan(4.0 / length))  # the cone it replaces
+
+    assert tetra_angle < cone_angle
+    assert 10.0 < tetra_angle < 12.0
+
+    # And it is area-matched to that cone's circular mouth.
+    tri_area = 3 * np.sqrt(3) / 4 * r**2
+    assert abs(tri_area - np.pi * 4.0**2) / (np.pi * 4.0**2) < 0.05
 
 
 def _one_triangle():
