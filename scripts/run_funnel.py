@@ -1,5 +1,7 @@
 """Milestone 4 scenario: the four-satellite funnel closes on a debris cloud
-from behind, sweeps through it, cinches the mouth, and captures.
+from behind, sweeps through it, and channels the debris down the membrane
+walls into the storage box at the apex satellite. The mouth stays open the
+whole time - the satellites never let go.
 
 The approach is reported analytically (the half-orbit coast is pure CW flow -
 no reason to grind it at millisecond timesteps), and the terminal sweep is run
@@ -40,10 +42,12 @@ def main() -> None:
     print("events:")
     for name, t_ev in sorted(result.events.items(), key=lambda kv: kv[1]):
         print(f"  {name}: t = {t_ev:.2f} s")
-    print(f"captured: {result.captured}")
-    print(f"final retained fraction: {result.retained_frac[-1]:.2f}  "
-          f"({round(result.retained_frac[-1] * n_pellets)}/{n_pellets} pellets)")
-    print(f"final mouth radius: {result.mouth_radius[-1]:.2f} m (built 5.0)")
+    print(f"captured (secured): {result.captured}")
+    print(f"stored in apex box: {result.stored_frac[-1]:.2f}  "
+          f"({round(result.stored_frac[-1] * n_pellets)}/{n_pellets} pellets)")
+    print(f"inside funnel:      {result.inside_funnel_frac[-1]:.2f}")
+    print(f"final mouth radius: {result.mouth_radius[-1]:.2f} m "
+          f"(built {sim.mouth_radius:.1f} - open throughout, satellites never let go)")
     print(f"formation-keeping dv (sweep): {result.formation_dv[-1]:.3f} m/s")
 
     plot(result)
@@ -69,7 +73,15 @@ def plot(result) -> None:
         pos = result.pos[-1]
         _draw_net(ax, pos, net, i, j, "tab:blue")
         pel = pos[result.pellets]
-        ax.scatter(pel[:, i], pel[:, j], s=10, color="tab:orange", zorder=3, label="pellets")
+        stored = result.stored_mask[-1]
+        ax.scatter(pel[~stored, i], pel[~stored, j], s=10, color="tab:orange", zorder=3,
+                   label="pellets (loose)")
+        ax.scatter(pel[stored, i], pel[stored, j], s=14, color="tab:red", zorder=3,
+                   label="pellets (stored)")
+        # The storage box: a soft one-way container mounted at the apex node.
+        apex = pos[N_SATS + net.apex_node]
+        ax.add_patch(plt.Circle((apex[i], apex[j]), 3.5, fill=False, color="tab:red",
+                                ls="--", lw=1.0, alpha=0.6))
         sats = pos[result.sats]
         ax.scatter(sats[MOUTH_SATS, i], sats[MOUTH_SATS, j], s=60, marker="s",
                    color="tab:green", zorder=4, label="mouth sats")
@@ -83,8 +95,10 @@ def plot(result) -> None:
         ax.legend(fontsize=7)
 
     ax = axes[1, 0]
-    ax.plot(result.t, result.retained_frac, label="retained fraction", color="tab:orange")
-    ax.plot(result.t, result.mouth_radius / 5.0, label="mouth radius / 5 m", color="tab:blue")
+    ax.plot(result.t, result.stored_frac, label="stored in apex box", color="tab:orange")
+    ax.plot(result.t, result.inside_funnel_frac, label="inside funnel", color="tab:green",
+            alpha=0.7)
+    ax.plot(result.t, result.mouth_radius / 4.0, label="mouth radius / 4 m", color="tab:blue")
     for name, t_ev in result.events.items():
         ax.axvline(t_ev, color="gray", alpha=0.4, lw=0.8)
         ax.text(t_ev, 1.02, name, rotation=90, fontsize=6, va="bottom")

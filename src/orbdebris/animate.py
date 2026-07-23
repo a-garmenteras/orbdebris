@@ -291,14 +291,16 @@ def animate_mission(
 # What phase the camera is in at each event time -> a caption. The half-orbit
 # approach coast is analytic (not stepped), so it is announced rather than shown.
 _FUNNEL_PHASES = {
-    "split": "DEPLOY & HOLD - one chaser splits into four; the net unfurls and the\n"
-    "formation station-keeps, holding the mouth open behind the cloud",
+    "split": "DEPLOY & HOLD - one chaser splits into four; the membrane funnel\n"
+    "unfurls and the formation station-keeps behind the cloud",
+    "trim": "TRIM - slots re-trimmed to the membrane's settled shape\n"
+    "(stop leaning on the structure)",
     "approach_burn": "APPROACH - burn radial-down, coast half an orbit (not shown),\n"
     "arrive sweeping radially UP through the cloud",
-    "first_contact": "SWEEP - the funnel engulfs the debris cloud",
-    "cinch_start": "CINCH - satellites release the rim; the drawstring purses it shut",
-    "captured": "CAPTURED - the cloud is bagged at the cod-end",
-    "regroup_start": "REGROUP - collapse to a compact formation for the next target",
+    "first_contact": "COLLECT - debris glances off the energy-absorbing walls and\n"
+    "channels down the funnel into the apex storage box",
+    "secured": "SECURED - the catch is stored in the apex box; the mouth stays\n"
+    "open and the satellites never let go",
 }
 
 
@@ -349,28 +351,36 @@ def animate_funnel(
     for ax, i, j, _, _ in projections:
         lc = LineCollection([], colors="tab:blue", linewidths=0.4, alpha=0.5)
         ax.add_collection(lc)
-        (pel,) = ax.plot([], [], "o", color="tab:orange", ms=4, label="pellets")
+        (pel,) = ax.plot([], [], "o", color="tab:orange", ms=4, label="pellets (loose)")
+        (pst,) = ax.plot([], [], "o", color="tab:red", ms=5, label="pellets (stored)")
         (msat,) = ax.plot([], [], "s", color="tab:green", ms=8, label="mouth sats")
         (asat,) = ax.plot([], [], "D", color="tab:red", ms=8, label="apex sat")
-        artists[ax] = (lc, pel, msat, asat, i, j)
+        box = plt.Circle((0, 0), 3.5, fill=False, color="tab:red", ls="--", lw=0.9, alpha=0.6)
+        ax.add_patch(box)
+        artists[ax] = (lc, pel, pst, msat, asat, box, i, j)
     ax_xy.legend(loc="upper right", fontsize=7)
 
     readout = fig.text(0.5, 0.965, "", ha="center", fontsize=10, family="monospace")
     caption = fig.text(0.5, 0.915, "", ha="center", fontsize=9, color="tab:blue")
 
+    apex_node_row = 4 + result.net.apex_node
+
     def update(f):
         k = frames[f]
         pos = result.pos[k]
         node_pos = pos[nodes]
-        for ax, (lc, pel, msat, asat, i, j) in artists.items():
+        stored = result.stored_mask[k]
+        for ax, (lc, pel, pst, msat, asat, box, i, j) in artists.items():
             segs = np.stack([node_pos[links[:, 0]][:, [i, j]],
                              node_pos[links[:, 1]][:, [i, j]]], axis=1)
             lc.set_segments(segs)
             pp = pos[pellets]
-            pel.set_data(pp[:, i], pp[:, j])
+            pel.set_data(pp[~stored, i], pp[~stored, j])
+            pst.set_data(pp[stored, i], pp[stored, j])
             ss = pos[sats]
             msat.set_data(ss[mouth_sats, i], ss[mouth_sats, j])
             asat.set_data([ss[apex_sat, i]], [ss[apex_sat, j]])
+            box.center = (pos[apex_node_row, i], pos[apex_node_row, j])
             # Camera: centre on the net, framing it plus any nearby cloud.
             cx, cy = net_c[k, i], net_c[k, j]
             near = np.linalg.norm(pp - net_c[k], axis=1) < 25.0
@@ -381,8 +391,8 @@ def animate_funnel(
             ax.set_ylim(cy - half, cy + half)
 
         t = result.t[k]
-        n_in = round(result.retained_frac[k] * len(result.pos[k, pellets]))
-        readout.set_text(f"t = {t:6.1f} s    bagged = {n_in:2d}    "
+        n_in = int(stored.sum())
+        readout.set_text(f"t = {t:6.1f} s    stored in box = {n_in:2d}    "
                          f"formation dv = {result.formation_dv[k]:.2f} m/s")
         caption.set_text(_phase_caption(result.events, t))
         return ()

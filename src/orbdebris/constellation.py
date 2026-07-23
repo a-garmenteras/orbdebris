@@ -2,9 +2,13 @@
 
 The operational concept: the chaser stages ~1 km *behind* the debris cloud and
 splits into four. Three satellites lead, holding a conical net's **mouth** open
-in formation; the fourth trails at the **apex** as the cod-end where the catch
-collects. The formation closes from behind, sweeps through the cloud like a
-trawler, cinches the mouth shut, and regroups.
+in formation; the fourth trails at the **apex**, which carries a storage box -
+the cod-end where the catch collects. The formation closes from behind and
+sweeps through the cloud like a trawler. The three satellites **never let go**:
+the funnel is a permanent structure that channels debris down its
+energy-absorbing walls into the apex box, driven by the sweep motion and a
+gentle shepherding thrust (there is no gravity to do it). Capture = debris
+settled in the box; the funnel stays open, ready to tow the catch away.
 
 Why four satellites at all: in vacuum there is no drag to stream a towed net
 open. A single chaser dragging a net just collapses it along the tether.
@@ -31,7 +35,12 @@ import numpy as np
 
 from orbdebris.capture import KM_TO_M, cw_accelerations, membrane_contact_forces
 from orbdebris.debris import PelletCloud
-from orbdebris.net import Net, link_forces
+from orbdebris.net import (
+    Net,
+    link_forces,
+    membrane_element_forces,
+    membrane_rest_data,
+)
 from orbdebris.relative import two_impulse_transfer
 
 # Body array layout: rows 0..3 = satellites, then net nodes, then pellets.
@@ -39,7 +48,7 @@ N_SATS = 4
 MOUTH_SATS = np.array([0, 1, 2])  # hold the mouth open, 120 deg apart
 APEX_SAT = 3  # trails at the cod-end
 
-SPLIT, APPROACH, SWEEP, CINCH, REGROUP = "SPLIT", "APPROACH", "SWEEP", "CINCH", "REGROUP"
+SPLIT, APPROACH, SWEEP, SECURE = "SPLIT", "APPROACH", "SWEEP", "SECURE"
 
 
 def formation_slots(mouth_radius: float, length: float) -> np.ndarray:
@@ -98,22 +107,28 @@ def funnel_demo(n_pellets: int = 30, seed: int = 11, standoff: float = 10.0):
     _, sweep_velocity = cw_propagate(behind, burn, tof, n)
     sweep_dir = sweep_velocity / np.linalg.norm(sweep_velocity)
 
+    # Narrow, long cone (~14 deg half-angle) so wall impacts stay glancing. The
+    # fabric is a continuous membrane (shell elements) so the cone holds its
+    # shape - a cord-only net collapses and leaks (isolated test: 16-18/30
+    # cords vs 29/30 with the membrane).
     net = build_funnel_net(
-        n_rings=6, n_sectors=12, mouth_radius=5.0, length=12.0, total_mass=20.0
+        n_rings=8, n_sectors=12, mouth_radius=4.0, length=16.0, total_mass=60.0
     )
-    cloud = make_pellet_cloud(n_pellets=n_pellets, sigma_pos=1.2, seed=seed)
+    cloud = make_pellet_cloud(n_pellets=n_pellets, sigma_pos=1.0, seed=seed)
     sim = FunnelSim.from_hill_state(
         net,
         cloud,
         n,
         chaser_rel_r_km=(-standoff * sweep_dir) / 1000.0,  # standoff before the cloud
         chaser_rel_v_km=np.zeros(3),
+        mouth_radius=4.0,
+        funnel_length=16.0,
+        # Energy-absorbing skin: inelastic normal contact, low tangential drag
+        # so glancing debris slides down to the apex box (Checkpoint 1 test).
         contact_omega=150.0,
-        contact_zeta=0.8,
-        tangent_zeta=0.5,
-        drawstring_close_time=10.0,  # gentle purse-string; a fast cinch flings the catch out
-        drawstring_min_frac=0.05,
-        capture_retain_frac=0.6,
+        contact_zeta=0.95,
+        tangent_zeta=0.05,
+        capture_frac=0.5,
     )
     approach = {"burn": burn, "tof": tof, "sweep_velocity": sweep_velocity}
     return sim, sweep_velocity, approach
@@ -121,15 +136,16 @@ def funnel_demo(n_pellets: int = 30, seed: int = 11, standoff: float = 10.0):
 
 def run_full_mission(
     standoff: float = 20.0,
-    settle: float = 60.0,
-    sweep: float = 110.0,
-    dt: float = 0.002,
-    record_every: int = 100,
+    settle: float = 50.0,
+    sweep: float = 150.0,  # long enough for debris to reach the apex box and secure
+    dt: float = 0.0015,
+    record_every: int = 130,
     seed: int = 11,
 ):
     """One continuous run covering the whole operation, for the animation:
     split (deploy the net) -> settle (mouth opens, formation holds) -> approach
-    burn -> sweep through the cloud -> cinch -> capture -> regroup.
+    burn -> sweep through the cloud -> collect (debris channels to the apex box)
+    -> secure. The satellites hold the mouth open the entire time.
 
     The 47-minute half-orbit coast between the burn and arrival is not stepped
     here (it is pure CW flow); the analytic arrival velocity is injected as the
@@ -144,6 +160,7 @@ def run_full_mission(
         record_every=record_every,
         sweep_velocity=sweep_velocity,
         sweep_burn_time=settle,
+        trim_time=0.8 * settle,  # re-trim to the settled shape before the burn
     )
     return sim, result, approach
 
@@ -219,8 +236,10 @@ class FunnelResult:
     t: np.ndarray
     pos: np.ndarray  # [S, B, 3]
     contact_count: np.ndarray
-    mouth_radius: np.ndarray
-    retained_frac: np.ndarray
+    mouth_radius: np.ndarray  # [S] should stay ~constant: the mouth never closes
+    stored_frac: np.ndarray  # [S] fraction of pellets settled in the apex box
+    inside_funnel_frac: np.ndarray  # [S] fraction engulfed by the funnel volume
+    stored_mask: np.ndarray  # [S, P] which pellets are in the box (for drawing)
     formation_error: np.ndarray  # [S] rms satellite slot error [m]
     formation_dv: np.ndarray  # [S] cumulative formation-keeping dv [m/s]
     events: dict
@@ -248,30 +267,49 @@ class FunnelSim:
     cloud: PelletCloud
     n: float
     sat_mass: float = 125.0  # each; 500 kg chaser splits into four
-    mouth_radius: float = 5.0
-    funnel_length: float = 12.0
-    # Net cords.
+    mouth_radius: float = 4.0
+    funnel_length: float = 16.0
+    # Net cords (edge reinforcement along the mesh lines).
     k_link: float = 400.0
     c_link: float = 6.0
+    # Continuous-membrane shell elements: the fabric is a surface with in-plane
+    # stretch/shear/COMPRESSION stiffness (a balloon skin), not just cords.
+    # This is what lets the cone hold its shape - a cord lattice goes slack
+    # under compression and the funnel collapses/leaks (isolated test: cords
+    # alone collect 16-18/30; with shell elements 29/30).
+    k_membrane: float = 150.0  # areal stiffness (Young's modulus x thickness)
+    membrane_poisson: float = 0.3
+    membrane_damping: float = 2.0
     # Satellite-to-net bonds (stiff: the satellites *are* the mouth's frame).
     k_bond: float = 800.0
     c_bond: float = 30.0
-    # Membrane contact (M3's gentle tuning).
+    # Membrane contact: high normal damping (inelastic - absorb the impact,
+    # no bounce), low tangential damping (glancing debris slides on toward the
+    # apex). See tests/test_capture.py::...absorbs_normal...glancing_debris_slide.
     contact_omega: float = 150.0
-    contact_zeta: float = 0.8
-    tangent_zeta: float = 0.5
+    contact_zeta: float = 0.95
+    tangent_zeta: float = 0.05
     enable_contact: bool = True
     # Formation control (velocity-limited PD; see FormationController).
     kp: float = 0.05
     kv: float = 0.5
     v_max: float = 0.15
     max_accel: float = 0.05
-    # Drawstring / capture.
-    drawstring_close_time: float = 4.0
-    drawstring_min_frac: float = 0.05
-    capture_retain_frac: float = 0.6
+    # Apex storage box: a soft one-way cod-end container at the apex node
+    # (radius ~= the last few metres of the funnel). Debris can enter but a
+    # boundary spring pushes back any that tries to drift out.
+    box_radius: float = 3.5
+    box_k: float = 30.0  # container-wall stiffness [N/m per unit mass-scaling]
+    # Shepherding: an OPTIONAL gentle forward accel. Off by default: the sweep
+    # motion alone funnels debris to the apex (a fixed-node test collects 30/30
+    # with zero shepherding). Nonzero shepherding actually drives debris into
+    # the walls harder and stalls it mid-funnel - kept only as a knob.
+    shepherd_accel: float = 0.0  # [m/s^2] along the mouth axis
+    # Capture criterion: fraction of pellets resident in the box, low relative
+    # speed, sustained.
+    capture_frac: float = 0.6
+    settle_speed: float = 0.15  # [m/s] max relative speed to count as settled
     capture_sustain: float = 2.0
-    regroup_delay: float = 5.0
 
     pos: np.ndarray = field(default=None, repr=False)
     vel: np.ndarray = field(default=None, repr=False)
@@ -284,6 +322,10 @@ class FunnelSim:
     _basis: np.ndarray = field(default=None, repr=False)
     _slot_offset: np.ndarray = field(default=None, repr=False)
     _hold_target: np.ndarray = field(default=None, repr=False)
+    _in_box: np.ndarray = field(default=None, repr=False)  # [P] has entered the box
+    _dm_inv: np.ndarray = field(default=None, repr=False)  # membrane rest data
+    _tri_area: np.ndarray = field(default=None, repr=False)
+    _shepherding: bool = False
     _phase: str = SPLIT
     _events: dict = field(default_factory=dict)
     _capture_ok_since: float = None
@@ -337,6 +379,8 @@ class FunnelSim:
         sim.mass[sim.sats] = sim.sat_mass
         sim.mass[sim.nodes] = net.masses
         sim.mass[sim.pellets] = cloud.masses
+        sim._in_box = np.zeros(cloud.n_pellets, dtype=bool)
+        sim._dm_inv, sim._tri_area = membrane_rest_data(net.positions, net.triangles)
         sim._rest0 = net.rest_lengths.copy()
         sim._rest = net.rest_lengths.copy()
 
@@ -366,7 +410,7 @@ class FunnelSim:
         return (w[:, None] * self.pos[self.pellets]).sum(axis=0)
 
     # ------------------------------------------------------------------ split
-    def split(self, fold_scale: float = 0.04) -> dict:
+    def split(self, fold_scale: float = 0.35) -> dict:
         """One chaser becomes four: a momentum-conserving separation impulse
         that pushes the satellites (and the folded net with them) out toward
         their formation slots, where the controller catches and holds them.
@@ -413,6 +457,20 @@ class FunnelSim:
         self._phase = APPROACH
         self._events["split"] = 0.0
         return {"split_dv_per_sat": self._split_dv, "slots": slots_hill}
+
+    def trim_slots(self) -> None:
+        """Re-trim the formation slots to the shape actually achieved.
+
+        The membrane's equilibrium rim radius is slightly inside the as-built
+        geometry (Poisson contraction of the cone), so slots at the blueprint
+        radius leave the controller leaning on the structure forever - a
+        steady ~0.13 m/s/s-per-satellite tug-of-war it can never win. A real
+        GNC system trims to the achieved shape instead of fighting it: set
+        each slot to the satellite's current offset from the centroid,
+        expressed in the formation's local frame."""
+        centroid = self.pos[self.sats].mean(axis=0)
+        offsets_hill = self.pos[self.sats] - centroid
+        self.ctrl.slots, _ = centre_slots(offsets_hill @ self._basis.T)
 
     def hold_position(self) -> None:
         """Station-keep the formation's whole absolute position (not just its
@@ -461,6 +519,12 @@ class FunnelSim:
         forces[self.nodes] += link_forces(
             node_pos, node_vel, self.net.links, self._rest, self.k_link, self.c_link
         )
+        # Continuous membrane: in-plane shell stiffness (incl. compression),
+        # the balloon-skin behaviour that keeps the cone from collapsing.
+        forces[self.nodes] += membrane_element_forces(
+            node_pos, node_vel, self.net.triangles, self._dm_inv, self._tri_area,
+            self.k_membrane, self.membrane_poisson, self.membrane_damping,
+        )
         if self._bonds is not None:
             forces += link_forces(
                 self.pos, self.vel, self._bonds, self._bond_rest, self.k_bond, self.c_bond
@@ -484,8 +548,52 @@ class FunnelSim:
                 tangent_zeta=self.tangent_zeta,
             )
 
+        # Apex storage box: a one-way soft container. A pellet that reaches the
+        # box (within box_radius of the apex node) is *latched* as collected;
+        # thereafter, if it drifts back out past the boundary, a spring pushes
+        # it back in. Crucially the constraint acts ONLY on already-collected
+        # pellets - distant cloud debris feels nothing (otherwise the box would
+        # be a tractor beam sucking in the whole cloud). Debris enters by being
+        # channelled down the funnel, not pulled.
+        apex_row = N_SATS + self.net.apex_node
+        apex = self.pos[apex_row]
+        apex_vel = self.vel[apex_row]
+        pel_rows = np.arange(self.cloud.n_pellets) + N_SATS + self.net.n_nodes
+        rel = self.pos[self.pellets] - apex
+        d = np.linalg.norm(rel, axis=1)
+        self._in_box |= d < self.box_radius  # latch on entry
+        escaping = self._in_box & (d > self.box_radius)
+        if np.any(escaping):
+            esc = np.flatnonzero(escaping)
+            u = rel[esc] / d[esc, None]  # outward radial unit
+            v_out = np.einsum("ij,ij->i", self.vel[self.pellets][esc] - apex_vel, u)
+            depth = d[esc] - self.box_radius
+            m_esc = self.cloud.masses[esc]
+            # Spring back in, plus damping of outward motion only (one-way).
+            f_mag = self.box_k * m_esc * (depth + 0.3 * np.maximum(v_out, 0.0) / self.contact_omega)
+            f_vec = f_mag[:, None] * u
+            forces[pel_rows[esc]] -= f_vec
+            # Equal-and-opposite reaction on the apex node the box is mounted
+            # to: the wall pushes the pellet in, the pellet pushes the box out.
+            # Without this the box is a force from nowhere and the whole
+            # assembly self-accelerates - the thrusters then fight a phantom
+            # forever (measured: 40 m/s of formation dv from exactly this).
+            forces[apex_row] += f_vec.sum(axis=0)
+
         accel = forces / self.mass[:, None]
         accel += cw_accelerations(self.pos, self.vel, self.n)
+
+        # Shepherding: a gentle continuous forward thrust on the whole formation
+        # once the sweep is engulfing the cloud. In the funnel's frame this is a
+        # steady apex-ward pseudo-force that drives debris down the walls into
+        # the box and pins it there - the job gravity does on Earth but cannot
+        # do here. Applied to satellites and net together so the funnel keeps
+        # its shape; its dv is counted as formation-keeping.
+        if self._shepherding:
+            push = self.shepherd_accel * self._basis[2]  # +mouth axis
+            accel[self.sats] += push
+            accel[self.nodes] += push
+            self.ctrl.dv_spent += self.shepherd_accel * dt
 
         # Formation-keeping thrust (satellites only), on top of everything.
         if self._phase != SPLIT:
@@ -521,77 +629,66 @@ class FunnelSim:
         mouth = self.pos[N_SATS + self.net.mouth_nodes]
         return float(np.linalg.norm(mouth - mouth.mean(axis=0), axis=1).mean())
 
-    def retained_frac(self) -> float:
-        """Fraction of pellets held by the net, measured as entanglement: a
-        pellet counts if it is within one funnel-length of the net's own
-        centroid. This is shape-agnostic - it reads the same whether the net is
-        an open cone sweeping the cloud or a crumpled bag being dragged away -
-        so it stays honest through the cinch and regroup, where a
-        volume-of-the-funnel measure spuriously drops as the cone collapses.
-        Escaped pellets (tens of metres out) fall well outside."""
+    def stored_mask(self) -> np.ndarray:
+        """Boolean [P]: pellets collected in the apex box - they have entered it
+        (the one-way latch) and are settled (low speed relative to the apex)."""
+        apex_row = N_SATS + self.net.apex_node
+        v_rel = np.linalg.norm(self.vel[self.pellets] - self.vel[apex_row], axis=1)
+        d = np.linalg.norm(self.pos[self.pellets] - self.pos[apex_row], axis=1)
+        return self._in_box & (d < self.box_radius + 0.5) & (v_rel < self.settle_speed)
+
+    def stored_frac(self) -> float:
+        """Fraction of pellets collected and settled in the apex box."""
+        return float(self.stored_mask().mean())
+
+    def inside_funnel_frac(self) -> float:
+        """Diagnostic: fraction of pellets within the funnel's bounding volume
+        (within one funnel-length of the net centroid). Reads how many have
+        been engulfed, whether or not they have reached the box yet."""
         net_c = self.pos[self.nodes].mean(axis=0)
         d = np.linalg.norm(self.pos[self.pellets] - net_c, axis=1)
         return float((d < self.funnel_length).mean())
+
+    def in_box_frac(self) -> float:
+        """Fraction of pellets that have *entered* the box (the one-way latch),
+        settled or not. Drives the decision to stop shepherding."""
+        return float(self._in_box.mean())
 
     def _update_phase(self, t: float, contacts: int) -> None:
         if self._phase == APPROACH and contacts > 0:
             self._phase = SWEEP
             self._events["first_contact"] = t
 
-        # Cinch on the geometric cue that made M3 work: the mouth ring has
-        # swept past the cloud centroid, so the catch is behind the rim.
-        if self._phase == SWEEP and "cinch_start" not in self._events:
+        # Optional shepherding (off by default; the sweep alone funnels the
+        # debris). If enabled, engage once the mouth has swept past the cloud
+        # centroid and stop once enough debris is in the box.
+        if (
+            self.shepherd_accel > 0
+            and self._phase == SWEEP
+            and not self._shepherding
+            and "shepherd_stop" not in self._events
+        ):
             mouth_c = self.pos[N_SATS + self.net.mouth_nodes].mean(axis=0)
             if (mouth_c - self.cloud_centroid()) @ self._basis[2] > 0:
-                self._events["cinch_start"] = t
-                self._phase = CINCH
-                # The mouth satellites have done their job (held the mouth open
-                # through the sweep). Release them from the rim so the
-                # drawstring can purse it shut on its own - hauling the
-                # satellites inward instead would whip the membrane and fling
-                # the catch back out (the M3 lesson). The apex satellite keeps
-                # holding the cod-end.
-                self._bonds = self._bonds[-1:]
-                self._bond_rest = self._bond_rest[-1:]
+                self._shepherding = True
+                self._events["shepherd_start"] = t
+        if self._shepherding and self.in_box_frac() >= self.capture_frac:
+            self._shepherding = False
+            self._events["shepherd_stop"] = t
 
-        if "cinch_start" in self._events:
-            # Gentle purse-string closure only (no satellites yanked around).
-            frac = 1.0 - (1.0 - self.drawstring_min_frac) * np.clip(
-                (t - self._events["cinch_start"]) / self.drawstring_close_time, 0.0, 1.0
-            )
-            self._rest[self.net.perimeter] = self._rest0[self.net.perimeter] * frac
-
-        if self._phase == CINCH:
-            if self.retained_frac() >= self.capture_retain_frac and self.mouth_radius_now() < (
-                0.4 * self.mouth_radius
-            ):
+        # Secure when a majority of the debris is stored in the box and settled,
+        # sustained. The funnel stays open the whole time - it is the structure
+        # holding the catch, ready to tow away. The satellites never let go.
+        if self._phase == SWEEP and not self._shepherding:
+            if self.stored_frac() >= self.capture_frac:
                 if self._capture_ok_since is None:
                     self._capture_ok_since = t
                 elif t - self._capture_ok_since >= self.capture_sustain:
                     self._captured = True
-                    self._events["captured"] = t
-                    self._events["regroup_start"] = t + self.regroup_delay
-                    self._phase = REGROUP
+                    self._events["secured"] = t
+                    self._phase = SECURE
             else:
                 self._capture_ok_since = None
-
-        if (
-            self._phase == REGROUP
-            and t >= self._events.get("regroup_start", np.inf)
-            and "regroup_applied" not in self._events
-        ):
-            # Reconfigure for transit to the next target: collapse the wide
-            # mouth formation into a compact cluster around the apex (and its
-            # captured cod-end). Set the target ONCE and keep it centred on the
-            # satellite centroid - un-centred slots would give the controller
-            # an unreachable target and it would thrust forever (the same trap
-            # the initial formation had). The velocity-limited controller makes
-            # the convergence a gentle glide.
-            compact = np.array(
-                [[2.0, 0.0, 0.0], [-1.0, 1.7, 0.0], [-1.0, -1.7, 0.0], [0.0, 0.0, -2.0]]
-            )
-            self.ctrl.slots, _ = centre_slots(compact)
-            self._events["regroup_applied"] = t
 
     # ------------------------------------------------------------------ run
     def run(
@@ -601,21 +698,29 @@ class FunnelSim:
         record_every: int = 50,
         sweep_velocity: np.ndarray | None = None,
         sweep_burn_time: float = 0.0,
+        trim_time: float | None = None,
     ) -> FunnelResult:
         """Integrate to t=duration.
 
         sweep_velocity: if given, applied to the whole formation (satellites +
         net) at sweep_burn_time - this is the arrival velocity of the analytic
         approach, injected as the maneuver that starts the sweep. It lets one
-        continuous run cover deploy -> settle -> sweep -> cinch -> regroup (see
+        continuous run cover deploy -> settle -> sweep -> collect -> secure (see
         run_full_mission), which is what the animation shows.
         """
         steps = int(round(duration / dt))
-        ts, poss, ccounts, mouths, retained, ferr, fdv = [], [], [], [], [], [], []
+        ts, poss, ccounts, mouths, stored, inside, smask, ferr, fdv = (
+            [], [], [], [], [], [], [], [], []
+        )
         swept = sweep_velocity is None
+        trimmed = trim_time is None
 
         for s in range(steps + 1):
             t = s * dt
+            if not trimmed and t >= trim_time:
+                self.trim_slots()  # stop leaning on the settled structure
+                self._events["trim"] = t
+                trimmed = True
             if not swept and t >= sweep_burn_time:
                 self.vel[self.sats] += sweep_velocity
                 self.vel[self.nodes] += sweep_velocity
@@ -628,7 +733,9 @@ class FunnelSim:
                 poss.append(self.pos.copy())
                 ccounts.append(contacts)
                 mouths.append(self.mouth_radius_now())
-                retained.append(self.retained_frac())
+                stored.append(self.stored_frac())
+                inside.append(self.inside_funnel_frac())
+                smask.append(self.stored_mask())
                 ferr.append(self.formation_error())
                 fdv.append(float(self.ctrl.dv_spent.sum()))
             self.vel += accel * dt
@@ -640,7 +747,9 @@ class FunnelSim:
             pos=np.array(poss),
             contact_count=np.array(ccounts),
             mouth_radius=np.array(mouths),
-            retained_frac=np.array(retained),
+            stored_frac=np.array(stored),
+            inside_funnel_frac=np.array(inside),
+            stored_mask=np.array(smask),
             formation_error=np.array(ferr),
             formation_dv=np.array(fdv),
             events=dict(self._events),

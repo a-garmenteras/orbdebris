@@ -26,6 +26,8 @@ def make_sim(**params) -> FunnelSim:
     # n_sectors must be divisible by 3 so the mouth satellites sit 120 deg apart.
     net = build_funnel_net(n_rings=5, n_sectors=12, mouth_radius=5.0, length=12.0)
     cloud = make_pellet_cloud(n_pellets=12, sigma_pos=1.2, seed=17)
+    params.setdefault("mouth_radius", 5.0)  # match the net built above
+    params.setdefault("funnel_length", 12.0)
     return FunnelSim.from_hill_state(
         net,
         cloud,
@@ -118,35 +120,40 @@ def test_formation_slots_must_be_centred_on_the_satellite_centroid():
 
 def test_formation_holds_the_mouth_open_and_it_costs_fuel():
     """A rigid formation is NOT a natural CW motion, so holding the funnel
-    open must (a) work and (b) cost delta-v continuously. Both are asserted:
-    the cost is the honest price of the concept, not a bug."""
+    open must (a) work and (b) cost delta-v continuously. After deployment the
+    slots are trimmed to the membrane's settled shape - a controller that
+    keeps demanding the blueprint radius leans on the structure forever."""
     sim = make_sim(enable_contact=False)
     sim.split()
+    sim.run(duration=180.0, dt=0.005, record_every=200)
+    sim.trim_slots()
 
-    result = sim.run(duration=300.0, dt=0.005, record_every=200)
+    result = sim.run(duration=120.0, dt=0.005, record_every=200)
 
-    assert result.formation_error[-1] < 0.5  # satellites reach and hold their slots
-    assert result.mouth_radius[-1] > 4.0  # mouth open (~5 m as built, minus sag)
+    assert result.formation_error[-1] < 0.3  # trimmed slots are reachable
+    assert result.mouth_radius[-1] > 4.0  # mouth held open (~5 m as built)
     assert result.formation_dv[-1] > 0.0  # it is not free
     assert np.all(np.diff(result.formation_dv) >= -1e-12)  # monotonic spend
 
 
-def test_rim_sags_between_its_three_supports():
-    """Real physics worth pinning: tension-only cords cannot push, so the rim
-    arcs sag inward between the three satellites holding it - exactly like a
-    trawl mouth between its spreaders. The satellites' own nodes stay out at
-    the built radius; the free nodes between them do not."""
+def test_membrane_holds_the_rim_round():
+    """With a continuous membrane (shell elements) the rim stays *round*: the
+    balloon skin transmits the three satellites' pull all the way around, so
+    the deep sag-between-supports of a tension-only cord rim is gone. (The old
+    cord-only funnel sagged from 5.0 to ~3.5 m between supports - that sag is
+    exactly why it leaked debris.)"""
     sim = make_sim(enable_contact=False)
     sim.split()
     sim.run(duration=250.0, dt=0.005, record_every=5000)
 
     mouth = sim.pos[N_SATS + sim.net.mouth_nodes]
     radii = np.linalg.norm(mouth - mouth.mean(axis=0), axis=1)
-    held = np.arange(0, len(radii), len(radii) // len(MOUTH_SATS))  # bonded nodes
 
-    assert radii[held].min() > 4.8  # supported nodes hold the built radius
-    assert radii.min() < radii[held].min()  # unsupported arcs sag inward
-    assert radii.min() > 3.0  # but only mildly - the mouth stays usable
+    # Measured: bonded nodes ~4.68 (pulled slightly in), free arcs ~5.27
+    # (bowed slightly out by the membrane) - round to within ~12%, versus the
+    # cord-only rim collapsing to ~1.5 m between supports.
+    assert radii.min() > 4.5  # near the built 5 m everywhere on the ring
+    assert radii.min() > 0.85 * radii.max()  # round: no deep inter-support sag
 
 
 def test_mouth_satellites_must_divide_the_rim_evenly():
@@ -158,13 +165,71 @@ def test_mouth_satellites_must_divide_the_rim_evenly():
         FunnelSim.from_hill_state(net, cloud, N_REF, np.array([0.0, -1.0, 0.0]), np.zeros(3))
 
 
+def test_apex_box_forces_are_internal():
+    """The storage box is mounted on the apex node, so wall force on a pellet
+    must have an equal-and-opposite reaction on the apex. A box without the
+    reaction is a force from nowhere: the assembly self-accelerates and the
+    thrusters burn ~40 m/s fighting the phantom (measured before the fix)."""
+    sim, sweep_velocity, _ = funnel_demo()
+    sim.deploy_open(np.zeros(3))
+    apex_row = N_SATS + sim.net.apex_node
+
+    # One pellet latched in the box, drifting outward; others parked far away.
+    sim.pos[sim.pellets] = sim.pos[apex_row] + np.array([0.0, 0.0, 60.0])
+    sim.vel[sim.pellets] = 0.0
+    p0 = N_SATS + sim.net.n_nodes
+    sim.pos[p0] = sim.pos[apex_row] + np.array([0.0, 0.0, 1.0])
+    sim.vel[p0] = sim.vel[apex_row] + np.array([0.0, 0.0, 0.8])
+    sim._in_box[0] = True
+    sim.pos[p0] = sim.pos[apex_row] + np.array([0.0, 0.0, sim.box_radius + 0.5])  # escaping
+
+    sim.enable_contact = False
+    sim._phase = "SPLIT"  # no controller thrust
+    sim._hold_target = None
+    accel, _ = sim._accelerations(0.0, 0.0)
+
+    # Total force minus the (state-proportional) CW pseudo-forces must vanish:
+    # every modelled force, box included, is an internal action-reaction pair.
+    from orbdebris.capture import cw_accelerations
+
+    cw = cw_accelerations(sim.pos, sim.vel, sim.n)
+    net_force = (sim.mass[:, None] * (accel - cw)).sum(axis=0)
+    assert np.linalg.norm(net_force) < 1e-9
+
+
+def test_apex_box_is_one_way():
+    """The storage box lets debris in but not out: a pellet parked just inside
+    the box with a small outward velocity must be pushed back, not escape."""
+    sim, sweep_velocity, approach = funnel_demo()
+    sim.deploy_open(sweep_velocity)
+    apex_row = N_SATS + sim.net.apex_node
+    apex = sim.pos[apex_row]
+
+    # Put one pellet just inside the box moving outward; freeze the rest far off.
+    sim.pos[sim.pellets] = apex + np.array([0.0, 0.0, 50.0])  # everyone else parked away
+    sim.vel[sim.pellets] = 0.0
+    p0 = N_SATS + sim.net.n_nodes  # first pellet row
+    sim.pos[p0] = apex + np.array([0.0, 0.0, 1.0])  # 1 m out, inside box_radius=1.8
+    sim.vel[p0] = sim.vel[apex_row] + np.array([0.0, 0.0, 0.6])  # drifting outward
+
+    sim.enable_contact = False  # isolate the box constraint from membrane hits
+    for _ in range(4000):
+        accel, _ = sim._accelerations(0.0, 0.0015)
+        sim.vel += accel * 0.0015
+        sim.pos += sim.vel * 0.0015
+
+    d = np.linalg.norm(sim.pos[p0] - sim.pos[apex_row])
+    assert d < sim.box_radius + 0.3  # held near the box, did not escape
+
+
 @pytest.mark.slow
-def test_end_to_end_sweep_captures_and_regroups_cheaply():
-    """The canonical M4 scenario (constellation.funnel_demo - the same one the
-    script runs): the funnel sweeps the cloud, cinches, captures a majority,
-    and regroups. Also guards the two centred-slot regressions - a broken
-    invariant makes the controller thrust forever, so the formation dv would
-    blow up (17 m/s+) instead of settling near ~2 m/s."""
+def test_end_to_end_funnel_collects_debris_into_the_apex_box():
+    """The canonical M4 funnel-to-storage scenario (constellation.funnel_demo,
+    the same one the script runs): the constellation sweeps the cloud and the
+    funnel channels a majority of the debris down its walls into the apex box,
+    where it settles - the three satellites NEVER let go and the mouth stays
+    open the whole time. Also guards the centred-slot regression (a broken
+    invariant makes the controller thrust forever)."""
     sim, sweep_velocity, approach = funnel_demo()
     n_pellets = sim.cloud.n_pellets
 
@@ -174,14 +239,16 @@ def test_end_to_end_sweep_captures_and_regroups_cheaply():
     assert abs(sweep_velocity[1]) < 1e-3
 
     sim.deploy_open(sweep_velocity)
-    result = sim.run(duration=140.0, dt=0.0015, record_every=200)
+    n_bonds_start = len(sim._bonds)
+    result = sim.run(duration=200.0, dt=0.0015, record_every=200)
 
     assert result.captured
-    assert result.events["cinch_start"] >= result.events["first_contact"] - 1e-9
-    assert result.retained_frac[-1] >= 0.6  # majority bagged
-    assert round(result.retained_frac[-1] * n_pellets) >= 0.6 * n_pellets
-
-    # Regroup must be a gentle glide, not a runaway: with the centred-slots
-    # invariant intact the formation cost settles well under 5 m/s.
-    assert result.formation_dv[-1] < 5.0
-    assert result.mouth_radius[-1] < 0.5  # mouth pursed shut
+    assert "secured" in result.events
+    # A majority ends stored and settled in the apex box.
+    assert result.stored_frac[-1] >= 0.6
+    assert round(result.stored_frac[-1] * n_pellets) >= 0.6 * n_pellets
+    # The satellites never released: bonds intact, mouth held open throughout.
+    assert len(sim._bonds) == n_bonds_start
+    assert result.mouth_radius[-1] > 2.5  # still open (built 4 m, minus sag)
+    # Formation cost stays bounded (no controller runaway).
+    assert result.formation_dv[-1] < 8.0

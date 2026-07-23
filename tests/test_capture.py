@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from orbdebris.capture import CHASER, KM_TO_M, CaptureSim, demo_scenario
+from orbdebris.capture import CHASER, KM_TO_M, CaptureSim, demo_scenario, membrane_contact_forces
 from orbdebris.constants import GM_EARTH, R_EARTH
 from orbdebris.debris import PelletCloud, make_pellet_cloud
 from orbdebris.net import build_net
@@ -136,6 +136,51 @@ def test_end_to_end_capture_and_tow():
     k0 = int(np.searchsorted(result.t, result.events["tow_start"]))
     tow_disp = np.linalg.norm(centroids[-1] - centroids[k0])
     assert tow_disp > 2.0  # metres: the bag demonstrably follows the chaser
+
+
+def _fire_pellet_at_flat_membrane(v_in, zeta, tangent_zeta, omega=150.0):
+    """Integrate one pellet bouncing off a fixed flat membrane (z=0 plane).
+    Returns the outgoing velocity. Nodes are held fixed (infinite mass)."""
+    nodes = np.array([[-5, -5, 0], [5, -5, 0], [5, 5, 0], [-5, 5, 0]], float)
+    node_vel = np.zeros((4, 3))
+    tris = np.array([[0, 1, 2], [0, 2, 3]])
+    p = np.array([[0.0, 0.0, 0.06]])
+    v = np.array([v_in], float)
+    m = np.array([0.05])
+    r = np.array([0.05])
+    dt = 0.0005
+    for _ in range(8000):
+        forces = np.zeros((5, 3))
+        membrane_contact_forces(
+            forces, nodes, node_vel, np.arange(4), tris, p, v, np.array([4]), r, m,
+            omega, zeta, tangent_zeta,
+        )
+        v += (forces[4] / m[0]) * dt
+        p += v * dt
+        if p[0, 2] > 0.3 and v[0, 2] > 0:  # bounced clear of the membrane
+            break
+    return v[0]
+
+
+def test_membrane_absorbs_normal_impact_but_lets_glancing_debris_slide():
+    """The funnel-to-storage capture relies on the membrane being an energy
+    absorber: a pellet's velocity component *normal* to the fabric is dissipated
+    (no bounce), while its *tangential* (glancing) component is largely
+    preserved so it slides on down the funnel toward the apex. With high normal
+    damping and low tangential damping, that asymmetry must hold."""
+    # 45-degree hit: equal normal and tangential speed coming in.
+    v_out = _fire_pellet_at_flat_membrane([1.0, 0.0, -1.0], zeta=0.95, tangent_zeta=0.05)
+    tangential, normal_rebound = v_out[0], v_out[2]
+
+    assert normal_rebound < 0.2  # normal impact absorbed - barely rebounds
+    assert tangential > 0.5  # most of the glancing slide survives
+    assert tangential > 5 * normal_rebound  # strongly asymmetric: slide >> bounce
+
+    # The old grippy tune (elastic normal, heavy tangential drag) does the
+    # opposite - it would bat debris back out rather than funnel it.
+    v_old = _fire_pellet_at_flat_membrane([1.0, 0.0, -1.0], zeta=0.3, tangent_zeta=0.5)
+    assert v_old[2] > normal_rebound  # bounces more
+    assert v_old[0] < tangential  # slides less
 
 
 def test_membrane_contact_conserves_momentum():

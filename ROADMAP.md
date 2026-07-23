@@ -55,22 +55,28 @@ to this order.
       concept, working end to end (`uv run python scripts/run_funnel.py`;
       animation `scripts/animate_funnel.py`): the chaser stages 1 km *behind*
       the cloud, splits into four; three lead in formation holding a conical
-      net's **mouth** open (this is why a constellation is needed — in vacuum
-      there is no drag to stream a towed net open, so formation flying does the
-      job water does for a trawler); the fourth trails at the **apex** cod-end.
-      The formation station-keeps while the net deploys, burns to close from
-      behind, sweeps through the cloud, purses the mouth shut, captures, and
-      collapses to a compact formation to regroup. Reuses the M3 engine
-      (membrane, pellets, contact, drawstring) via a shared force core; new work
-      is the conical net, the velocity-limited PD formation controller, and the
-      approach. *Result:* 28/30 pellets bagged, ~2–4 m/s formation-keeping over
-      the whole operation.
+      membrane funnel's **mouth** open (this is why a constellation is needed —
+      in vacuum there is no drag to stream a towed net open, so formation flying
+      does the job water does for a trawler); the fourth trails at the **apex**,
+      carrying the storage box. The formation station-keeps while the funnel
+      deploys, burns to close from behind, and sweeps through the cloud; debris
+      glances off the energy-absorbing walls and is channelled down into the
+      apex box. **The three satellites never let go — the mouth stays open the
+      whole time.** Reuses the M3 engine (contact, pellets, CW) via a shared
+      force core; new work is the conical membrane, the velocity-limited PD
+      formation controller, the approach, and the one-way storage box.
+      *Result:* 18/30 stored and settled in the box, mouth held at 3.8 m,
+      ~8.7 m/s formation-keeping for the whole operation.
       *Physics note:* burning prograde to "speed up and catch from behind" is
       the M1 trap in CW clothing — `ẍ = +2nẏ` balloons you radially (a 2 m/s
       prograde burn drifts +539 m up in 500 s and still misses). The CW solve
       for a half-orbit transfer answers with a burn that is *purely radial-
       down*, arriving *purely radial-up* — the constellation catches the cloud
       by sweeping vertically, never chasing along-track.
+      *Superseded design:* the first version closed a drawstring purse-net,
+      which required the mouth satellites to release the rim. The author replaced it
+      with the funnel-to-storage concept below — more physical, and it removes
+      the cinch/release/regroup machinery entirely.
 - [ ] **Milestone 5 — Fuel & power constraints.** Resource budgets feeding
       back into guidance decisions. *Groundwork exists: the planner's
       `max_mission_time` deadline already selects a point on the fuel/time
@@ -88,10 +94,22 @@ to this order.
   no real friction (tangential velocity damping stands in), no pellet-pellet
   collisions (dilute cloud), and gravity inside the capture region is the
   linear CW approximation.
-- **Constellation:** the satellite-to-net attachment is a stiff tension-only
-  bond, not a modelled winch/boom; the "cod-end" is where pellets gather, not a
-  sealed container; the regroup target is a fixed compact cluster, not an
-  optimised transit formation.
+- **Constellation:** the satellite-to-funnel attachment is a stiff tension-only
+  bond, not a modelled boom; the apex storage box is a soft one-way constraint,
+  not a modelled hatch or valve; the membrane's wrinkle model is an area-ratio
+  gate, not true buckling.
+- **The funnel under-deploys axially** — the known top issue. Measured: it
+  reaches 8.1 m of its 16 m design length (51%), so the working half-angle is
+  ~25° instead of the designed 14°, and impacts are steeper than the glancing
+  regime the concept wants. Nothing tensions the cone lengthwise: the three
+  satellites hold the *mouth ring*, but the apex end is only carried along, so
+  the membrane stays partly folded. Worse, `trim_slots()` (which fixed the
+  40 m/s tug-of-war) then *accepts that shortened shape as the target*, locking
+  the under-deployment in. This is most of the gap between end-to-end
+  collection (18/30) and the isolated, fully-extended funnel (~29/30). Fix
+  direction: tension the funnel axially during deploy (the apex satellite pulls
+  back to full extension) before trimming, or trim only the radial slot
+  components so axial extension is still commanded.
 - **Orbits:** two-body only — no J2, no drag, no SRP. This is why
   station-keeping costs ~0.1 m/s/year here; real LEO station-keeping is
   dominated by drag make-up, and differential ballistic coefficients between
@@ -150,15 +168,22 @@ to this order.
   Per-pellet contact stiffness `k_i = m_i*omega²` keeps a 2 g pellet and a
   1.4 kg pellet on the same contact timescale (a fixed k would put the light
   one outside the stable timestep). Decided 2026-07-17.
-- **Capture is gentle and geometric, learned from three failures:** (1) fast
-  contact is near-elastic — 2.6 m/s batted pellets to ±200 m; approach at
-  ~1.2 m/s with heavily damped (inelastic) contact so the membrane herds.
-  (2) Trigger the drawstring on *geometry* (mouth ring has swept past the
-  cloud centroid), not first contact — first contact fires on the nearest
-  pellet and bags only the cloud's leading edge. (3) The bridle arrest is
-  impulsive and flings the catch back out: soften and heavily damp it, and
-  cinch the mouth to 5% so cm pellets cannot slip the gap. Retention went
-  7% -> 17% -> 77%. Decided 2026-07-17.
+- **Capture is gentle and geometric, learned from three failures** (M3's
+  single-chaser tossed net): (1) fast contact is near-elastic — 2.6 m/s batted
+  pellets to ±200 m; approach at ~1.2 m/s with heavily damped (inelastic)
+  contact so the membrane herds. (2) Trigger the drawstring on *geometry*
+  (mouth ring has swept past the cloud centroid), not first contact — first
+  contact fires on the nearest pellet and bags only the cloud's leading edge.
+  (3) The bridle arrest is impulsive and flings the catch back out: soften and
+  heavily damp it, and cinch the mouth to 5% so cm pellets cannot slip the gap.
+  Retention went 7% -> 17% -> 77%. Decided 2026-07-17.
+- **Contact damping is deliberately anisotropic:** high *normal* damping
+  (inelastic — absorb the perpendicular impact, no bounce) with low
+  *tangential* damping (glancing debris keeps sliding). Measured on a flat
+  membrane: a 45° hit rebounds <10% normally while retaining ~85% of its
+  tangential slide. This asymmetry is what makes a funnel channel debris rather
+  than bat it away, and it is the M3 "grippy" tuning inverted. Decided
+  2026-07-23.
 - **Formation-keeping is a real, ongoing cost:** a rigid formation held across
   the velocity vector is *not* a natural CW motion (only pure along-track
   offsets are), so the three mouth satellites thrust continuously to hold the
@@ -171,13 +196,49 @@ to this order.
   unreachable fixed point and the controller thrusts forever (this bug bit
   three times: initial formation, regroup, and is why `centre_slots` exists).
   Decided 2026-07-22.
-- **The cinch releases the satellites; it does not haul them:** closing the
-  mouth by flying the three satellites inward whips the membrane and flings the
-  catch back out (the M3 arrest lesson again). Instead the satellites release
-  the rim and a gentle drawstring purses it shut — 67% → 90% retention. And the
-  net deploys under a whole-formation **position hold**, or its deploy transient
-  billows the funnel forward into the cloud before the approach burn. Decided
-  2026-07-22.
+- **Capture is a funnel to a storage box, not a closing purse-net** (the author's
+  redesign, supersedes the cinch): the three satellites *never let go*. The
+  funnel is a permanent structure whose energy-absorbing inner walls channel
+  debris to a **one-way storage box** on the apex satellite. Glancing impacts
+  shed their small normal-velocity component and slide on; only near-
+  perpendicular hits would bounce, which a shallow cone (~14° half-angle) and
+  gentle post-rendezvous closing speeds avoid. This deletes the cinch,
+  drawstring, rim-release and collapse-regroup machinery entirely.
+  *Realism basis:* energy-absorbing impact fabrics are mature (Whipple/Nextel/
+  Kevlar shields; Stardust captured comet dust at ~6 km/s in aerogel), and our
+  mission makes it easy — rendezvous brings relative speeds to cm/s–1 m/s, so
+  a 10 g pellet at 1 m/s carries ~5e-5 J. Note there is **no gravity** to pull
+  debris down the funnel: migration is *sweep-driven* (the funnel scoops the
+  cloud like a trawl), which is why an added "shepherding" thrust made things
+  *worse* — it drove debris into the walls and stalled it mid-funnel (isolated
+  test: 30/30 collected with zero shepherding, 17/30 with it). Decided
+  2026-07-23.
+- **The fabric must be a continuous membrane, not a cord lattice:** a
+  tension-only cord goes slack under compression, so a cord-only funnel
+  collapses and leaks (16–18/30 isolated, 1–4/30 in the full sim). Adding
+  **constant-strain shell elements** (St-Venant–Kirchhoff, rotation-invariant
+  Green strain) gives the surface in-plane stretch/shear/**compression**
+  stiffness — a balloon skin — and collection jumps to 29–30/30 at *any*
+  stiffness tested: it is the character of the stiffness that matters, not its
+  magnitude. The rim also goes round (4.7–5.3 m all the way) instead of sagging
+  to 1.5 m between supports. Two corrections raw St-VK needs: a **wrinkle gate**
+  (folded fabric goes limp instead of storing absurd elastic energy — without
+  it, deploying from a fold detonates) with a **small floor** standing in for
+  bending stiffness (without it, folds lock closed forever). Decided 2026-07-23.
+- **Every modelled force must be an action-reaction pair:** the storage box
+  first pushed pellets inward with no reaction on anything — a force from
+  nowhere that self-accelerated the assembly while the thrusters burned ~40 m/s
+  chasing the phantom. The reaction now lands on the apex node the box is
+  mounted to, and a test asserts total non-CW force is zero. Related: the box
+  must only retain debris that has *entered* it (a one-way latch); constraining
+  everything outside its radius made it a tractor beam that sucked in the whole
+  cloud from 20 m away. Decided 2026-07-23.
+- **Trim the controller to the structure it holds:** the membrane's settled rim
+  radius sits slightly inside the as-built blueprint, so slots at the blueprint
+  radius leave the controller leaning on the structure forever (~40 m/s of
+  tug-of-war it can never win). `trim_slots()` re-trims each slot to the
+  achieved geometry after deployment — 40 → 8.7 m/s. Real GNC trims to the
+  shape it got, not the one on the drawing. Decided 2026-07-23.
 - **Compute scale-separation, again:** the 47-minute half-orbit approach is
   pure CW flow, computed analytically; only the ~60 s terminal sweep runs in
   the fine contact sim. Same split the mission scale used (drift analytic,

@@ -105,10 +105,10 @@ def build_net(
 
 
 def build_funnel_net(
-    n_rings: int = 6,
+    n_rings: int = 8,
     n_sectors: int = 12,
-    mouth_radius: float = 5.0,
-    length: float = 12.0,
+    mouth_radius: float = 4.0,
+    length: float = 16.0,
     total_mass: float = 20.0,
     mouth_mass: float = 1.0,
 ) -> Net:
@@ -217,6 +217,100 @@ def link_forces(
     forces = np.zeros_like(pos)
     np.add.at(forces, i, f)
     np.add.at(forces, j, -f)
+    return forces
+
+
+def membrane_rest_data(
+    positions: np.ndarray, triangles: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute per-triangle rest quantities for shell elements: the inverse
+    of the 2D rest edge matrix (Dm_inv) and the rest area. Call once at build."""
+    a = positions[triangles[:, 0]]
+    b = positions[triangles[:, 1]]
+    c = positions[triangles[:, 2]]
+    e1, e2 = b - a, c - a
+    # 2D basis in each rest triangle's own plane.
+    x_hat = e1 / np.linalg.norm(e1, axis=1, keepdims=True)
+    normal = np.cross(e1, e2)
+    area = 0.5 * np.linalg.norm(normal, axis=1)
+    z_hat = normal / np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+    y_hat = np.cross(z_hat, x_hat)
+    # Rest edges in local 2D coords -> Dm (2x2 per triangle), then invert.
+    dm = np.empty((len(triangles), 2, 2))
+    dm[:, 0, 0] = np.einsum("ij,ij->i", e1, x_hat)
+    dm[:, 1, 0] = np.einsum("ij,ij->i", e1, y_hat)
+    dm[:, 0, 1] = np.einsum("ij,ij->i", e2, x_hat)
+    dm[:, 1, 1] = np.einsum("ij,ij->i", e2, y_hat)
+    return np.linalg.inv(dm), area
+
+
+def membrane_element_forces(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    triangles: np.ndarray,
+    dm_inv: np.ndarray,
+    area: np.ndarray,
+    k: float,
+    poisson: float,
+    damping: float,
+) -> np.ndarray:
+    """Continuous-membrane (shell) forces from constant-strain triangles, using
+    a St-Venant-Kirchhoff material -> per-node force array [N, 3].
+
+    Unlike 1D cords, a shell element resists in-plane *stretch, shear AND
+    compression* of the surface itself - it is what makes the fabric a
+    continuous membrane (a balloon skin) rather than a slack net. Because it
+    uses the rotation-invariant Green strain E = 1/2 (F^T F - I), a rigid
+    rotation produces zero force; only genuine deformation does.
+
+    One correction to raw St-Venant-Kirchhoff: heavily *folded* fabric does not
+    store huge elastic energy - it wrinkles, losing compressive stiffness. So
+    each triangle's stress is gated by its area ratio: below ~70% of rest area
+    the element fades out (wrinkled, limp), recovering full stiffness as it
+    unfolds. Without this, deploying from a folded state detonates.
+
+    k folds the sheet's Young's modulus and thickness into one areal stiffness.
+    """
+    i0, i1, i2 = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+    ds = np.stack([pos[i1] - pos[i0], pos[i2] - pos[i0]], axis=-1)  # [T,3,2]
+    f_grad = ds @ dm_inv  # deformation gradient F [T,3,2]
+
+    green = 0.5 * (np.einsum("tki,tkj->tij", f_grad, f_grad) - np.eye(2))  # E [T,2,2]
+    mu = k / (2 * (1 + poisson))
+    lam = k * poisson / (1 - poisson**2)
+    tr = green[:, 0, 0] + green[:, 1, 1]
+    stress = 2 * mu * green + lam * tr[:, None, None] * np.eye(2)  # 2nd PK S [T,2,2]
+
+    piola = f_grad @ stress  # first PK P = F S [T,3,2]
+
+    # Wrinkle gating: fade stiffness for *severely* folded triangles (area
+    # < 50% of rest, mostly gone by 20%) - crumpled fabric goes limp instead
+    # of storing elastic energy, while mild compression keeps full stiffness
+    # so the cone still holds its shape. A small floor (5%) stands in for the
+    # fabric's bending stiffness: folded cloth still faintly pushes itself
+    # open, so deployment progressively unfolds instead of locking into a
+    # zero-force folded state.
+    cur_normal = np.cross(pos[i1] - pos[i0], pos[i2] - pos[i0])
+    cur_area = 0.5 * np.linalg.norm(cur_normal, axis=1)
+    wrinkle = 0.05 + 0.95 * np.clip(
+        (cur_area / np.maximum(area, 1e-12) - 0.2) / 0.3, 0.0, 1.0
+    )
+    piola *= wrinkle[:, None, None]
+
+    # Nodal forces: H = -area * P Dm_inv^T; columns act on nodes 1,2; node 0 = -sum.
+    h = -area[:, None, None] * (piola @ np.transpose(dm_inv, (0, 2, 1)))  # [T,3,2]
+    f1, f2 = h[:, :, 0], h[:, :, 1]
+    f0 = -(f1 + f2)
+
+    forces = np.zeros_like(pos)
+    np.add.at(forces, i0, f0)
+    np.add.at(forces, i1, f1)
+    np.add.at(forces, i2, f2)
+
+    if damping > 0.0:  # light viscous damping toward each triangle's mean velocity
+        for idx in (i0, i1, i2):
+            v_mean = (vel[i0] + vel[i1] + vel[i2]) / 3.0
+            np.add.at(forces, idx, -damping * (vel[idx] - v_mean))
     return forces
 
 

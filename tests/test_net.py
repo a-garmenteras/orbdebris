@@ -5,6 +5,8 @@ from orbdebris.net import (
     build_net,
     closest_points_on_triangles,
     link_forces,
+    membrane_element_forces,
+    membrane_rest_data,
 )
 
 
@@ -106,6 +108,70 @@ def test_funnel_membrane_is_closed_around_each_ring():
     # The apex is closed by a fan of one triangle per sector.
     apex_tris = (net.triangles == net.apex_node).any(axis=1).sum()
     assert apex_tris == 6
+
+
+def _one_triangle():
+    rest = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    tris = np.array([[0, 1, 2]])
+    dm_inv, area = membrane_rest_data(rest, tris)
+    return rest, tris, dm_inv, area
+
+
+def test_membrane_element_is_rotation_invariant():
+    """A shell element must produce zero force under rigid rotation - only
+    genuine deformation loads it. (Green strain, not linear strain.)"""
+    rest, tris, dm_inv, area = _one_triangle()
+    th = np.radians(40)
+    rot = rest @ np.array(
+        [[np.cos(th), -np.sin(th), 0], [np.sin(th), np.cos(th), 0], [0, 0, 1]]
+    ).T
+    f = membrane_element_forces(rot, np.zeros((3, 3)), tris, dm_inv, area, 100.0, 0.3, 0.0)
+    assert np.abs(f).max() < 1e-9
+
+
+def test_membrane_element_resists_stretch_and_compression():
+    """The whole point of shells over cords: the surface resists in-plane
+    compression (pushes back out) as well as stretch (pulls back in). A
+    tension-only cord lattice goes slack under compression - which is exactly
+    why the cord-based funnel could not hold its cone shape."""
+    rest, tris, dm_inv, area = _one_triangle()
+    vel = np.zeros((3, 3))
+
+    stretched = rest.copy()
+    stretched[1, 0] = 1.5
+    f = membrane_element_forces(stretched, vel, tris, dm_inv, area, 100.0, 0.3, 0.0)
+    assert f[1, 0] < -1.0  # pulled back inward
+
+    compressed = rest.copy()
+    compressed[1, 0] = 0.6
+    f = membrane_element_forces(compressed, vel, tris, dm_inv, area, 100.0, 0.3, 0.0)
+    assert f[1, 0] > 1.0  # pushed back outward - impossible for a cord
+
+
+def test_membrane_wrinkles_when_severely_folded():
+    """Crumpled fabric goes (nearly) limp: a deeply folded triangle transmits
+    only a faint force - the 5% floor standing in for bending stiffness, which
+    lets folded cloth push itself open instead of locking folded. Without the
+    gate, deploying from a fold stores absurd elastic energy and detonates."""
+    rest, tris, dm_inv, area = _one_triangle()
+    vel = np.zeros((3, 3))
+    folded = rest * 0.05  # 5% scale: deep fold
+
+    f_folded = membrane_element_forces(folded, vel, tris, dm_inv, area, 100.0, 0.3, 0.0)
+    # Same strain state without gating would be enormous; compare against a
+    # mildly compressed (ungated) element to show the fold is ~limp.
+    mild = rest * 0.8
+    f_mild = membrane_element_forces(mild, vel, tris, dm_inv, area, 100.0, 0.3, 0.0)
+
+    assert np.abs(f_folded).max() < np.abs(f_mild).max()  # deep fold ~limp
+    assert np.abs(f_folded).max() > 0.0  # but faintly pushes itself open
+
+
+def test_membrane_element_conserves_momentum():
+    rest, tris, dm_inv, area = _one_triangle()
+    deformed = rest * np.array([1.3, 0.8, 1.0])  # arbitrary in-plane deformation
+    f = membrane_element_forces(deformed, np.zeros((3, 3)), tris, dm_inv, area, 100.0, 0.3, 0.0)
+    assert np.allclose(f.sum(axis=0), 0.0, atol=1e-9)  # internal forces only
 
 
 def test_closest_point_on_triangle_regions():
