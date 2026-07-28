@@ -16,6 +16,8 @@ import numpy as np
 from orbdebris.kepler import kepler_propagate
 from orbdebris.lambert import lambert
 from orbdebris.phasing import TransferPlan
+from orbdebris.propulsion import PHASING as PHASING_PHASE
+from orbdebris.propulsion import FuelLedger
 from orbdebris.relative import hill_state_to_eci
 from orbdebris.rendezvous import RendezvousPolicy
 
@@ -33,15 +35,30 @@ class MissionPolicy:
         handoff_offset: np.ndarray,
         terminal_policy: RendezvousPolicy,
         arrival_coast: float,
+        ledger: FuelLedger | None = None,
+        vehicle: str = "chaser",
     ):
+        """ledger: optional FuelLedger. The two transfer burns are recorded
+        under PHASING; the nested terminal policy records its own under
+        TERMINAL, so the split between "getting there" and "staying there"
+        falls out of the ledger rather than needing to be reconstructed."""
         self.mu = mu
         self.plan = plan
         self.handoff_offset = np.asarray(handoff_offset, dtype=float)
         self.terminal = terminal_policy
         self.arrival_coast = arrival_coast
+        self.ledger = ledger
+        self.vehicle = vehicle
         self.mode = DRIFT
         self.depart_dv = 0.0
         self.arrive_dv = 0.0
+
+    def _spend(self, t: float, dv: np.ndarray) -> float:
+        """Record a phasing burn (km/s in, m/s stored); returns its magnitude."""
+        mag = float(np.linalg.norm(dv))
+        if self.ledger is not None:
+            self.ledger.record_kms(t, mag, PHASING_PHASE, self.vehicle)
+        return mag
 
     def decide(
         self,
@@ -66,7 +83,7 @@ class MissionPolicy:
             )
             v1, _ = lambert(sat_r, target_r, self.plan.tof, self.mu)
             dv = v1 - sat_v
-            self.depart_dv = float(np.linalg.norm(dv))
+            self.depart_dv = self._spend(t, dv)
             self.mode = ARRIVE
             return dv, self.plan.tof
 
@@ -77,7 +94,7 @@ class MissionPolicy:
                 self.handoff_offset, np.zeros(3), debris_r, debris_v, self.mu
             )
             dv = desired_v - sat_v
-            self.arrive_dv = float(np.linalg.norm(dv))
+            self.arrive_dv = self._spend(t, dv)
             self.mode = TERMINAL
             return dv, self.arrival_coast
 

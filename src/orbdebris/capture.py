@@ -37,11 +37,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from orbdebris.constants import KM_TO_M  # noqa: F401  (re-exported: callers import it from here)
 from orbdebris.debris import PelletCloud
 from orbdebris.net import Net, closest_points_on_triangles, link_forces
 from orbdebris.relative import two_impulse_transfer
-
-KM_TO_M = 1000.0
 
 # Body array layout: row 0 = chaser, rows 1..1+N = net nodes, then pellets.
 CHASER, NODES0 = 0, 1

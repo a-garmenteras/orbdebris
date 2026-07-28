@@ -138,6 +138,43 @@ def test_formation_holds_the_mouth_open_and_it_costs_fuel():
     assert np.all(np.diff(result.formation_dv) >= -1e-12)  # monotonic spend
 
 
+def test_ledger_flush_loses_nothing_and_separates_tension_from_formation():
+    """The tie-back for M5's accounting: the controller's fast per-step
+    accumulator is the truth, and the ledger flushes deltas into it once per
+    recorded frame. FORMATION + TENSION must reconstruct the total exactly - if
+    they do not, thrust is being dropped between frames or double counted.
+
+    They must also *separate*: unfurling the funnel and holding its mouth open
+    are different jobs on different satellites, and billing them to one line
+    would hide that the apex satellite is the thirstiest of the four.
+    """
+    from orbdebris.propulsion import FORMATION, TENSION, FuelLedger, Vehicle
+
+    ledger = FuelLedger()
+    names = [f"sat{i}" for i in range(N_SATS)]
+    for name in names:
+        ledger.add_vehicle(Vehicle(name=name, dry_mass=100.0, prop_mass=25.0, isp=220.0))
+
+    sim, _, _ = funnel_demo()
+    sim.enable_contact = False
+    sim.split()
+    sim.hold_position()
+    sim.run(30.0, dt=0.0015, record_every=1000, ledger=ledger, vehicle_names=names)
+
+    # Nothing lost between flushes (note this is the controller's true total,
+    # not the sampled formation_dv[-1], which stops at the last recorded frame).
+    booked = ledger.total_dv(phase=FORMATION) + ledger.total_dv(phase=TENSION)
+    assert booked == pytest.approx(float(sim.ctrl.dv_spent.sum()), rel=1e-9)
+
+    # Tensioning is the apex satellite's job alone.
+    assert ledger.total_dv(phase=TENSION) > 0.0
+    assert ledger.total_dv(phase=TENSION, vehicle=f"sat{APEX_SAT}") == pytest.approx(
+        ledger.total_dv(phase=TENSION)
+    )
+    for k in MOUTH_SATS:
+        assert ledger.total_dv(phase=TENSION, vehicle=f"sat{k}") == 0.0
+
+
 def test_apex_thruster_unfurls_the_funnel_completely():
     """THE regression guard for the concertina bug. Without axial tensioning
     the cone folded back on itself at mid-length, reaching only 51% of its

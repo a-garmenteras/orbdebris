@@ -32,6 +32,11 @@ class ScenarioResult:
     separation: np.ndarray
     rel_r: np.ndarray  # chaser position relative to debris, in the Hill frame [N, 3]
     burn_times: np.ndarray
+    # Magnitudes [km/s] of the burns at burn_times, in the same order. This is
+    # the engine's unlabelled record of what was *actually flown*; the policies
+    # separately record the same burns into a FuelLedger with phase labels, and
+    # the two are cross-checked (see tests/test_mission.py).
+    burn_dv: np.ndarray
 
 
 def simulate(
@@ -55,6 +60,7 @@ def simulate(
     t_chunks, sat_r_chunks, sat_v_chunks = [], [], []
     debris_r_chunks, debris_v_chunks = [], []
     burn_times: list[float] = []
+    burn_dv: list[float] = []
 
     sat_r, sat_v = np.asarray(sat_r0, float), np.asarray(sat_v0, float)
     debris_r, debris_v = np.asarray(debris_r0, float), np.asarray(debris_v0, float)
@@ -64,8 +70,10 @@ def simulate(
     while t < t_final - 1e-9:
         dv, coast = guidance(t, sat_r, sat_v, debris_r, debris_v)
         sat_v = sat_v + dv
-        if np.linalg.norm(dv) > 0:
+        dv_mag = float(np.linalg.norm(dv))
+        if dv_mag > 0:
             burn_times.append(t)
+            burn_dv.append(dv_mag)
 
         coast = min(coast, t_final - t)
         n_samp = min(max(2, int(round(coast / dt)) + 1), max_samples_per_segment)
@@ -110,6 +118,7 @@ def simulate(
         separation,
         rel_r,
         np.array(burn_times),
+        np.array(burn_dv),
     )
 
 

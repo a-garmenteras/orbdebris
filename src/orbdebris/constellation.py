@@ -41,6 +41,13 @@ from orbdebris.net import (
     membrane_element_forces,
     membrane_rest_data,
 )
+# Ledger phase labels are aliased: this module already uses SPLIT/SWEEP as
+# state-machine names (line below). The strings happen to coincide today, but
+# relying on that would be an invisible coupling between two unrelated
+# vocabularies.
+from orbdebris.propulsion import SPLIT as SPLIT_PHASE
+from orbdebris.propulsion import SWEEP as SWEEP_PHASE
+from orbdebris.propulsion import FORMATION, TENSION, FuelLedger
 from orbdebris.relative import two_impulse_transfer
 
 # Body array layout: rows 0..3 = satellites, then net nodes, then pellets.
@@ -141,6 +148,8 @@ def run_full_mission(
     dt: float = 0.0015,
     record_every: int = 130,
     seed: int = 11,
+    ledger: FuelLedger | None = None,
+    vehicle_names: list[str] | None = None,
 ):
     """One continuous run covering the whole operation, for the animation:
     split (deploy the net) -> settle (mouth opens, formation holds) -> approach
@@ -152,7 +161,20 @@ def run_full_mission(
     burn that starts the sweep. Returns (sim, result, approach).
     """
     sim, sweep_velocity, approach = funnel_demo(standoff=standoff, seed=seed)
-    sim.split()
+    names = vehicle_names or [f"sat{i}" for i in range(N_SATS)]
+    split = sim.split()
+    if ledger is not None:
+        for k, name in enumerate(names):
+            ledger.record(0.0, float(split["split_dv_by_sat"][k]), SPLIT_PHASE, name)
+        # The cost of closing on the cloud is the *departure* burn computed
+        # analytically 47 minutes earlier - purely radial-down, from 1 km
+        # behind. `sweep_velocity` is the arrival state that burn produces, not
+        # a second impulse: skipping the arrival burn is exactly what makes this
+        # a sweep-through instead of a rendezvous. Billing |sweep_velocity|
+        # would double-charge the manoeuvre.
+        dv_burn = float(np.linalg.norm(approach["burn"]))
+        for name in names:
+            ledger.record(0.0, dv_burn, SWEEP_PHASE, name)
     sim.hold_position()  # loiter in place while the net deploys
     result = sim.run(
         settle + sweep,
@@ -161,6 +183,8 @@ def run_full_mission(
         sweep_velocity=sweep_velocity,
         sweep_burn_time=settle,
         trim_time=0.8 * settle,  # re-trim to the settled shape before the burn
+        ledger=ledger,
+        vehicle_names=names,
     )
     return sim, result, approach
 
@@ -200,10 +224,17 @@ class FormationController:
     v_max: float = 0.15  # [m/s] cruise limit
     max_accel: float = 0.05  # [m/s^2] actuator limit
     dv_spent: np.ndarray = None
+    # Of dv_spent, the part the apex thruster used to unfurl the funnel. Kept
+    # as a *subset* rather than a separate budget so dv_spent stays the single
+    # total (formation_dv is unchanged by this bookkeeping), while the ledger
+    # can still bill unfurling and mouth-holding to different phases.
+    dv_tension: np.ndarray = None
 
     def __post_init__(self):
         if self.dv_spent is None:
             self.dv_spent = np.zeros(N_SATS)
+        if self.dv_tension is None:
+            self.dv_tension = np.zeros(N_SATS)
 
     def accelerations(
         self, sat_pos: np.ndarray, sat_vel: np.ndarray, basis: np.ndarray, dt: float
@@ -466,12 +497,20 @@ class FunnelSim:
 
         self.vel[self.sats] = base_vel + dv_sats
         self.vel[self.nodes] = base_vel + dv_nodes
-        self._split_dv = float(np.linalg.norm(dv_sats, axis=1).mean())
+        per_sat = np.linalg.norm(dv_sats, axis=1)
+        self._split_dv = float(per_sat.mean())
 
         self._attach_bonds()
         self._phase = APPROACH
         self._events["split"] = 0.0
-        return {"split_dv_per_sat": self._split_dv, "slots": slots_hill}
+        # per-sat magnitudes as well as the mean: the separation impulse is not
+        # equal across the four (the apex travels furthest), and the ledger
+        # bills each satellite's own tank.
+        return {
+            "split_dv_per_sat": self._split_dv,
+            "split_dv_by_sat": per_sat,
+            "slots": slots_hill,
+        }
 
     def trim_slots(self) -> None:
         """Re-trim the formation slots to the shape actually achieved.
@@ -621,6 +660,7 @@ class FunnelSim:
         ):
             accel[APEX_SAT] -= self.apex_tension_accel * self._basis[2]
             self.ctrl.dv_spent[APEX_SAT] += self.apex_tension_accel * dt
+            self.ctrl.dv_tension[APEX_SAT] += self.apex_tension_accel * dt
 
         # Shepherding: a gentle continuous forward thrust on the whole formation
         # once the sweep is engulfing the cloud. In the funnel's frame this is a
@@ -757,6 +797,8 @@ class FunnelSim:
         sweep_velocity: np.ndarray | None = None,
         sweep_burn_time: float = 0.0,
         trim_time: float | None = None,
+        ledger: FuelLedger | None = None,
+        vehicle_names: list[str] | None = None,
     ) -> FunnelResult:
         """Integrate to t=duration.
 
@@ -765,8 +807,19 @@ class FunnelSim:
         approach, injected as the maneuver that starts the sweep. It lets one
         continuous run cover deploy -> settle -> sweep -> collect -> secure (see
         run_full_mission), which is what the animation shows.
+
+        ledger: optional FuelLedger. Formation-keeping is *continuous* thrust,
+        so the controller keeps its fast per-step accumulator (correct, and at
+        dt~1.5 ms we are not writing 100k ledger rows) and this **flushes the
+        delta** into the ledger once per recorded frame - one entry per
+        satellite, split into FORMATION and TENSION. Fine granularity where it
+        is free, coarse where it is not: the same scale separation the analytic
+        approach / stepped sweep split already uses.
         """
         steps = int(round(duration / dt))
+        names = vehicle_names or [f"sat{i}" for i in range(N_SATS)]
+        last_form = self.ctrl.dv_spent - self.ctrl.dv_tension
+        last_tens = self.ctrl.dv_tension.copy()
         ts, poss, ccounts, mouths, stored, inside, smask, ferr, fdv = (
             [], [], [], [], [], [], [], [], []
         )
@@ -796,9 +849,30 @@ class FunnelSim:
                 smask.append(self.stored_mask())
                 ferr.append(self.formation_error())
                 fdv.append(float(self.ctrl.dv_spent.sum()))
+                if ledger is not None:
+                    form = self.ctrl.dv_spent - self.ctrl.dv_tension
+                    for k, name in enumerate(names):
+                        ledger.record(t, float(form[k] - last_form[k]), FORMATION, name)
+                        ledger.record(
+                            t, float(self.ctrl.dv_tension[k] - last_tens[k]), TENSION, name
+                        )
+                    last_form = form.copy()
+                    last_tens = self.ctrl.dv_tension.copy()
             self.vel += accel * dt
             self.pos += self.vel * dt
             self._update_phase(t, contacts)
+
+        # Final flush: `steps` rarely divides evenly by record_every, so the
+        # last few steps' thrust would otherwise be dropped. The ledger holds
+        # the true total; formation_dv[-1] is the sampled one and sits a hair
+        # below it.
+        if ledger is not None:
+            form = self.ctrl.dv_spent - self.ctrl.dv_tension
+            for k, name in enumerate(names):
+                ledger.record(duration, float(form[k] - last_form[k]), FORMATION, name)
+                ledger.record(
+                    duration, float(self.ctrl.dv_tension[k] - last_tens[k]), TENSION, name
+                )
 
         return FunnelResult(
             t=np.array(ts),

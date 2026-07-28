@@ -27,6 +27,9 @@ without you needing to manually activate it.
 uv run orbdebris                              # reference mission: drift -> Lambert -> CW hold
 uv run python scripts/make_animation.py       # render mission.gif (three-panel animation, ~2 min)
 uv run python scripts/phasing_tradeoff.py     # fuel-vs-time Pareto study -> phasing_tradeoff.png
+uv run python scripts/run_funnel.py           # M4 four-satellite funnel capture
+uv run python scripts/animate_funnel.py       # render funnel.gif (~4 min)
+uv run python scripts/fuel_budget.py          # M5 fuel ledger: the whole mission in m/s and kg
 ```
 
 The reference mission starts the chaser 100 km below the debris and 45°

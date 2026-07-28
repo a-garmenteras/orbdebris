@@ -82,11 +82,21 @@ to this order.
       with the funnel-to-storage concept below — more physical, and it removes
       the cinch/release/regroup machinery entirely.
 - [ ] **Milestone 5 — Fuel & power constraints.** Resource budgets feeding
-      back into guidance decisions. *Groundwork exists: the planner's
-      `max_mission_time` deadline already selects a point on the fuel/time
-      Pareto front (see `scripts/phasing_tradeoff.py`). This milestone turns
-      that into an explicit urgency/priority policy — how fast a given debris
-      must come down vs. what its removal costs in fuel.*
+      back into guidance decisions. Three stages:
+  - [x] **5a — One ledger, then kilograms** (`src/orbdebris/propulsion.py`,
+        `uv run python scripts/fuel_budget.py`). Every guidance module now
+        records into a single `FuelLedger`, and Tsiolkovsky turns the total into
+        propellant mass. *Result for the reference M2b→M4 mission:* **87.7 m/s,
+        19.1 kg** of a 100 kg hydrazine load (Isp 220 s). Breakdown: getting
+        there dominates — PHASING 65.3 m/s (74%) and the terminal 20 km→1 km
+        transfer 17.6 m/s (20%) — while the entire four-satellite capture
+        (split + sweep + tensioning + formation-keeping) is 4.7 m/s (5%).
+  - [ ] **5b — Urgency sets the deadline.** Physically-derived urgency
+        (collision flux × mass × residual lifetime) choosing `max_mission_time`,
+        producing the cost-of-urgency curve.
+  - [ ] **5c — Multi-target campaign.** One tank, N targets: the case where a
+        budget actually *binds* and changes which debris you go after. Also the
+        discrete decision problem M6 would learn on.
 - [ ] **Milestone 6 — Autonomy / training.** Revisit classical vs. learned
       (RL) control now that the fundamentals and a working environment
       exist.
@@ -186,9 +196,13 @@ to this order.
 - **Formation-keeping is a real, ongoing cost:** a rigid formation held across
   the velocity vector is *not* a natural CW motion (only pure along-track
   offsets are), so the three mouth satellites thrust continuously to hold the
-  funnel open — ~8 m/s/day at hold, ~2–4 m/s over a capture. Reporting that
-  cost is the point, not a bug: it is the fuel answer to "why not just fly a
-  net?" The controller is a **velocity-limited PD** (position error commands a
+  funnel open — **23 m/s/day** at a quiescent trimmed hold (measured properly in
+  M5a; the earlier ~8 m/s/day conflated a per-run number with a rate) and 2.9
+  m/s over a capture. Reporting that cost is the point, not a bug: it is the
+  fuel answer to "why not just fly a net?" For scale, the *single* chaser
+  drift-nulling at its 1 km hold spends 0.003 m/s/day — some 7500x less, so the
+  formation is the expensive thing, not the orbit. The controller is a
+  **velocity-limited PD** (position error commands a
   clamped cruise velocity; an inner loop regulates to it), because a plain PD
   saturates *outward* at large error and overshoots by v²/(2·a_max). Its slots
   must stay centred on the satellite centroid — an un-centred target is an
@@ -272,6 +286,55 @@ to this order.
   tug-of-war it can never win). `trim_slots()` re-trims each slot to the
   achieved geometry after deployment — 40 → 8.7 m/s. Real GNC trims to the
   shape it got, not the one on the drawing. Decided 2026-07-23.
+- **Fuel accounting is one ledger of entries, never totals** (M5a): delta-v is
+  *created* in three incompatible shapes — discrete ECI impulses in km/s
+  (`simulate`), continuous Hill-frame thrust integrated per step in m/s
+  (`FormationController`), and a planner estimate never reconciled against what
+  was flown (`TransferPlan`). The fix is a *boundary*, not a rewrite: each
+  source converts once when it hands delta-v to `FuelLedger`, canonical unit
+  m/s. Totals are derived by query, so the headline number and the breakdown
+  cannot disagree. Caveat recorded in the module: summing |dv| is right for
+  propellant but is not the vector sum and is not invertible — no trajectory can
+  be reconstructed from the ledger. Two source gaps were closed on the way:
+  `ScenarioResult` recorded burn *times* but not magnitudes, so the terminal
+  rendezvous cost (17.6 m/s, a fifth of the mission) was literally unmeasurable;
+  and `TERMINAL` used to bundle the 20 km→1 km transfer with station-keeping,
+  hiding that one is paid once and the other forever. Decided 2026-07-24.
+- **Continuous thrust flushes, it does not stream:** the formation controller
+  keeps its fast per-step accumulator (at dt≈1.5 ms we are not writing 100k
+  ledger rows) and flushes the delta once per recorded frame, plus a final flush
+  so the last partial interval is not dropped. Fine granularity where it is
+  free, coarse where it is not — the same scale separation as analytic coast /
+  stepped sweep. A test asserts FORMATION + TENSION reconstructs the
+  controller's own total exactly. Decided 2026-07-24.
+- **Firing order usually doesn't matter, except twice:** for one vehicle at one
+  Isp, propellant from the *summed* delta-v equals replaying burns one at a time
+  — the mass ratios telescope (`m0/m1 · m1/m2 = m0/m2`). It fails at the
+  **split** (500 kg chaser → 4×125 kg: phasing is paid at the heavy mass,
+  everything after at the light one) and for **per-phase attribution** (a
+  subset's propellant depends on the mass when those burns fired). So entries
+  are ordered and attributed, per-phase propellant comes from replay, and a test
+  pins the telescoping identity so nobody "optimises" the replay away and then
+  trips over the split. Decided 2026-07-24.
+- **Never extrapolate a rate from a transient run:** the first loiter-crossover
+  estimate read **1235 m/s/day**, taken by dividing a capture's formation-keeping
+  by its 200 s duration — but that window is almost entirely deploy transient,
+  slot re-trim, sweep burn and debris impact, all one-off. A dedicated quiescent
+  hold gives **23 m/s/day**. And the same measurement re-exposed the trim bug
+  from a new angle: *without* `trim_slots()` the quiescent rate is 199 m/s/day
+  (8.5x too high), because a short run hides a constant-rate error inside its
+  transient while a steady hold makes it the only thing left. Decided
+  2026-07-24.
+- **Power is a sanity check, not a subsystem** (M5a, decided with the author): the
+  acceleration caps we invented correspond to 6.25 N (formation-keeping) and
+  7.5 N (apex tensioning) on a 125 kg satellite — inside the range of real
+  monopropellant thrusters (1–22 N classes are standard), though near the top of
+  it, i.e. we assumed a generously actuated satellite. Nothing needed changing;
+  it needed checking. **Electric propulsion is explicitly deferred**: at Isp
+  ~1600 s it would slash propellant mass, but its ~0.1 N thrust cannot produce
+  an impulsive burn, and every guidance module here (Lambert, CW two-impulse,
+  the mission state machine) assumes impulses. Adopting it is a re-architecture,
+  not a parameter change. Decided 2026-07-24.
 - **Compute scale-separation, again:** the 47-minute half-orbit approach is
   pure CW flow, computed analytically; only the ~60 s terminal sweep runs in
   the fine contact sim. Same split the mission scale used (drift analytic,

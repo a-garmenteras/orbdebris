@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from orbdebris import HANDOFF_OFFSET, HOLD_OFFSET, build_scenario
 from orbdebris.constants import GM_EARTH, R_EARTH
@@ -83,3 +84,30 @@ def test_full_mission_closes_and_holds_from_far_coplanar_start():
     assert held.max() < hold_dist + 1.0
     # And it should have been cheap, because it drifted to the window.
     assert (policy.depart_dv + policy.arrive_dv) * 1000 < 150.0
+
+
+def test_ledger_agrees_with_what_the_engine_actually_flew():
+    """The engine records burn magnitudes; the policies separately record the
+    same burns into the ledger with phase labels. Two independent code paths, so
+    agreement is a real cross-check - and it is the reconciliation that did not
+    exist before (simulate kept only burn *times*)."""
+    from orbdebris.propulsion import PHASING, STATIONKEEP, TERMINAL, FuelLedger, Vehicle
+
+    ledger = FuelLedger()
+    ledger.add_vehicle(Vehicle(name="chaser", dry_mass=400.0, prop_mass=100.0, isp=220.0))
+    sat_r, sat_v, debris_r, debris_v, policy, t_final, _ = build_scenario(ledger=ledger)
+
+    result = simulate(sat_r, sat_v, debris_r, debris_v, policy.decide, t_final, GM_EARTH, dt=30.0)
+
+    assert len(result.burn_dv) == len(result.burn_times)
+    flown = result.burn_dv.sum() * 1000.0  # km/s -> m/s
+    assert ledger.total_dv() == pytest.approx(flown, rel=1e-9)
+
+    # The phases must partition the whole thing, and PHASING must dominate:
+    # getting there is the mission's real cost.
+    assert set(ledger.phases()) <= {PHASING, TERMINAL, STATIONKEEP}
+    assert ledger.total_dv(phase=PHASING) > ledger.total_dv(phase=TERMINAL)
+    # Station-keeping via drift-nulling is ~4 orders of magnitude cheaper than
+    # the transfer that got us there - the point of controlling drift rate
+    # rather than position.
+    assert ledger.total_dv(phase=STATIONKEEP) < 0.01 * ledger.total_dv(phase=TERMINAL)

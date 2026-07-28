@@ -15,6 +15,7 @@ import numpy as np
 from orbdebris.constants import GM_EARTH, R_EARTH
 from orbdebris.mission import MissionPolicy
 from orbdebris.phasing import plan_min_fuel_transfer, synodic_period
+from orbdebris.propulsion import FuelLedger
 from orbdebris.relative import mean_motion
 from orbdebris.rendezvous import RendezvousPolicy
 from orbdebris.simulate import simulate
@@ -30,12 +31,17 @@ def build_scenario(
     chaser_altitude: float = 400.0,
     chaser_phase_offset: float = np.radians(45.0),
     max_mission_time: float | None = None,
+    ledger: FuelLedger | None = None,
+    vehicle: str = "chaser",
 ):
     """Debris on a circular LEO orbit; chaser on a different coplanar orbit.
 
     max_mission_time [s]: the deadline the planner must fit inside. Defaults to
     ~1 synodic period, which is enough to reach the fuel-optimal window (the
     geometry repeats after that, so waiting longer buys nothing).
+
+    ledger [s]: optional FuelLedger threaded into both policies, so the transfer
+    burns land under PHASING and the station-keeping under TERMINAL.
     """
     debris_a = R_EARTH + debris_altitude
     chaser_a = R_EARTH + chaser_altitude
@@ -79,6 +85,8 @@ def build_scenario(
         # driver, so keep it tight; along-track costs nothing, so let it roam
         # rather than paying to buy it back.
         deadband=np.array([0.02, 0.5, 0.05]),
+        ledger=ledger,
+        vehicle=vehicle,
     )
     policy = MissionPolicy(
         mu=GM_EARTH,
@@ -86,6 +94,8 @@ def build_scenario(
         handoff_offset=HANDOFF_OFFSET,
         terminal_policy=terminal,
         arrival_coast=period / 20,
+        ledger=ledger,
+        vehicle=vehicle,
     )
     t_final = plan.t_depart + plan.tof + period / 20 + 0.4 * period + 2.5 * period
     return sat_r, sat_v, debris_r, debris_v, policy, t_final, period
